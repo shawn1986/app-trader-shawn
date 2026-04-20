@@ -26,8 +26,23 @@ class AiDecisionService:
             decision.secondary_payload = exc.to_payload()
         except (OSError, SubprocessError) as exc:
             decision.secondary_payload = provider_error_from_runtime_failure(
-                "secondary",
+                self._provider_name(self._secondary),
                 exc,
             ).to_payload()
 
         return decision
+
+    @staticmethod
+    def _provider_name(provider: AiProvider | None) -> str:
+        if provider is None:
+            return "secondary"
+
+        explicit_name = getattr(provider, "provider_name", None)
+        if isinstance(explicit_name, str) and explicit_name.strip():
+            return explicit_name
+
+        command = getattr(provider, "_command", None)
+        if isinstance(command, str) and command.strip():
+            return command
+
+        return type(provider).__name__
