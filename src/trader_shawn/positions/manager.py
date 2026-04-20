@@ -127,11 +127,17 @@ class PositionManager:
                     snapshot,
                     limit_price=float(snapshot.current_debit),
                 )
-            except Exception:
-                self._audit_logger.update_managed_position_if_status(
+            except Exception as exc:
+                self._audit_logger.record_position_event(
                     managed_position["position_id"],
-                    expected_status="closing",
-                    status="open",
+                    "close_submit_uncertain",
+                    {
+                        "exit_reason": submission_target["exit_reason"],
+                        "limit_price": float(snapshot.current_debit),
+                        "broker_fingerprint": managed_position["broker_fingerprint"],
+                        "error": str(exc),
+                    },
+                    created_at=recorded_at,
                 )
                 raise
 

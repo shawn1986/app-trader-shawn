@@ -1749,7 +1749,7 @@ def test_manage_positions_fails_closed_on_duplicate_identical_saved_strict_ident
     assert positions[1]["status"] == "open"
 
 
-def test_manage_positions_returns_position_to_open_when_submit_fails(
+def test_manage_positions_leaves_position_closing_when_submit_fails_ambiguously(
     tmp_path: Path,
 ) -> None:
     logger = AuditLogger(tmp_path / "audit.db")
@@ -1816,11 +1816,11 @@ def test_manage_positions_returns_position_to_open_when_submit_fails(
         manager.manage_positions()
 
     persisted = logger.fetch_active_managed_positions(mode="paper")[0]
-    assert persisted["status"] == "open"
+    assert persisted["status"] == "closing"
     assert persisted["last_known_debit"] == 0.42
     assert persisted["last_evaluated_at"] is not None
     assert failing_executor.calls == [("AMD", 0.42)]
-    assert logger.fetch_position_events("pos-1") == []
+    assert logger.fetch_position_events("pos-1")[-1]["event_type"] == "close_submit_uncertain"
 
     retry_executor = FakeManageExecutor()
     retry_manager = PositionManager(
@@ -1839,8 +1839,8 @@ def test_manage_positions_returns_position_to_open_when_submit_fails(
 
     result = retry_manager.manage_positions()
 
-    assert result["status"] == "submitted"
-    assert retry_executor.calls == [("AMD", 0.42)]
+    assert result == {"status": "ok", "managed_count": 1}
+    assert retry_executor.calls == []
     assert logger.fetch_active_managed_positions(mode="paper")[0]["status"] == "closing"
 
 
