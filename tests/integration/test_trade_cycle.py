@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from trader_shawn.app import cli, run_trade_cycle
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread
+from trader_shawn.execution.ibkr_executor import IbkrExecutor
 from trader_shawn.monitoring.dashboard_api import (
     build_dashboard_snapshot,
     read_dashboard_snapshot,
@@ -57,13 +58,34 @@ class StubDecisionService:
 
 class StubExecutor:
     def __init__(self, *, error: Exception | None = None) -> None:
-        self.calls: list[tuple[object, float]] = []
+        self.open_calls: list[tuple[object, float, int]] = []
+        self.close_calls: list[tuple[object, float]] = []
         self._error = error
+
+    def submit_open_credit_spread(
+        self,
+        payload: object,
+        *,
+        limit_credit: float,
+        quantity: int = 1,
+    ) -> dict:
+        if self._error is not None:
+            raise self._error
+        self.open_calls.append((payload, limit_credit, quantity))
+        return {
+            "status": "submitted",
+            "payload": {
+                "symbol": payload.ticker,
+                "expiry": payload.expiry,
+                "short_strike": payload.short_strike,
+                "long_strike": payload.long_strike,
+            },
+        }
 
     def submit_limit_combo(self, payload: object, *, limit_price: float) -> dict:
         if self._error is not None:
             raise self._error
-        self.calls.append((payload, limit_price))
+        self.close_calls.append((payload, limit_price))
         return {
             "status": "submitted",
             "payload": {
@@ -152,7 +174,8 @@ def test_run_trade_cycle_returns_no_candidates_without_decision_or_submission() 
 
     assert result == {"status": "no_candidates"}
     assert decision_service.calls == []
-    assert executor.calls == []
+    assert executor.open_calls == []
+    assert executor.close_calls == []
 
 
 def test_cli_is_invokable_via_click_runner() -> None:
@@ -178,7 +201,8 @@ def test_run_trade_cycle_stops_when_decision_is_not_approve() -> None:
 
     assert result["status"] == "decision_rejected"
     assert result["reason"] == "ok"
-    assert executor.calls == []
+    assert executor.open_calls == []
+    assert executor.close_calls == []
 
 
 def test_run_trade_cycle_rejects_unknown_decision_action() -> None:
@@ -337,7 +361,27 @@ def test_run_trade_cycle_stops_when_risk_guard_rejects_candidate() -> None:
     assert result == {"status": "risk_rejected", "reason": "max_open_risk_pct"}
     assert len(risk_guard.calls) == 1
     assert risk_guard.calls[0][0] is approved
-    assert executor.calls == []
+    assert executor.open_calls == []
+    assert executor.close_calls == []
+
+
+def test_run_trade_cycle_fails_closed_when_risk_guard_is_missing() -> None:
+    executor = StubExecutor()
+
+    result = run_trade_cycle(
+        candidates=[_spread()],
+        account=_account(),
+        decision_service=StubDecisionService(),
+        executor=executor,
+        risk_guard=None,
+    )
+
+    assert result == {
+        "status": "risk_rejected",
+        "reason": "risk_guard_missing",
+    }
+    assert executor.open_calls == []
+    assert executor.close_calls == []
 
 
 def test_run_trade_cycle_submits_order_when_candidate_and_risk_pass() -> None:
@@ -359,10 +403,46 @@ def test_run_trade_cycle_submits_order_when_candidate_and_risk_pass() -> None:
     assert result["payload"]["short_strike"] == 170
     assert result["payload"]["long_strike"] == 165
     assert risk_guard.calls[0][0] is approved
-    assert executor.calls[0][0].short_strike == approved.short_strike
-    assert executor.calls[0][0].long_strike == approved.long_strike
-    assert executor.calls[0][0].expiry == approved.expiry
-    assert executor.calls[0][1] == 1.05
+    assert executor.open_calls[0][0] is approved
+    assert executor.open_calls[0][1] == 1.05
+    assert executor.open_calls[0][2] == 1
+    assert executor.close_calls == []
+
+
+def test_run_trade_cycle_uses_sell_to_open_combo_with_ibkr_executor() -> None:
+    result = run_trade_cycle(
+        candidates=[_spread()],
+        account=_account(),
+        decision_service=StubDecisionService(limit_credit=1.15),
+        executor=IbkrExecutor(),
+        risk_guard=StubRiskGuard(allowed=True),
+    )
+
+    assert result["status"] == "stubbed"
+    assert result["broker"] == "ibkr"
+    assert result["order"]["legs"] == [
+        {
+            "action": "SELL",
+            "ratio": 1,
+            "right": "P",
+            "strike": 160,
+            "expiry": "2026-04-30",
+        },
+        {
+            "action": "BUY",
+            "ratio": 1,
+            "right": "P",
+            "strike": 155,
+            "expiry": "2026-04-30",
+        },
+    ]
+    assert result["order"]["order"] == {
+        "action": "SELL",
+        "orderType": "LMT",
+        "totalQuantity": 1,
+        "lmtPrice": 1.15,
+        "transmit": False,
+    }
 
 
 def test_run_trade_cycle_returns_structured_error_when_executor_raises() -> None:
