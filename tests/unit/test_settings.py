@@ -102,3 +102,93 @@ def test_load_settings_rejects_malformed_events_shape(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError):
         load_settings(config_dir)
+
+
+@pytest.mark.parametrize(
+    ("risk", "expected_field"),
+    [
+        (
+            "max_risk_per_trade_pct: -0.01\nmax_daily_loss_pct: 0.04\nmax_new_positions_per_day: 6\nmax_open_risk_pct: 0.20\nmax_spreads_per_symbol: 2\nprofit_take_pct: 0.50\nstop_loss_multiple: 2.0\nexit_dte_threshold: 5\n",
+            "max_risk_per_trade_pct",
+        ),
+        (
+            "max_risk_per_trade_pct: 0.02\nmax_daily_loss_pct: 0.04\nmax_new_positions_per_day: 6\nmax_open_risk_pct: 1.20\nmax_spreads_per_symbol: 2\nprofit_take_pct: 0.50\nstop_loss_multiple: 2.0\nexit_dte_threshold: 5\n",
+            "max_open_risk_pct",
+        ),
+        (
+            "max_risk_per_trade_pct: 0.02\nmax_daily_loss_pct: 0.04\nmax_new_positions_per_day: -1\nmax_open_risk_pct: 0.20\nmax_spreads_per_symbol: 2\nprofit_take_pct: 0.50\nstop_loss_multiple: 2.0\nexit_dte_threshold: 5\n",
+            "max_new_positions_per_day",
+        ),
+        (
+            "max_risk_per_trade_pct: 0.02\nmax_daily_loss_pct: 0.04\nmax_new_positions_per_day: 6\nmax_open_risk_pct: 0.20\nmax_spreads_per_symbol: 0\nprofit_take_pct: 0.50\nstop_loss_multiple: 2.0\nexit_dte_threshold: 5\n",
+            "max_spreads_per_symbol",
+        ),
+    ],
+)
+def test_load_settings_rejects_invalid_risk_values(
+    tmp_path: Path, risk: str, expected_field: str
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    write_config(config_dir, risk=risk)
+
+    with pytest.raises(ValidationError, match=expected_field):
+        load_settings(config_dir)
+
+
+@pytest.mark.parametrize(
+    ("providers", "expected_field"),
+    [
+        (
+            "provider_mode: claude_primary\nprimary_provider: claude_cli\nsecondary_provider: codex\nprovider_timeout_seconds: 0\nsecondary_timeout_seconds: 10\n",
+            "provider_timeout_seconds",
+        ),
+        (
+            "provider_mode: claude_primary\nprimary_provider: claude_cli\nsecondary_provider: codex\nprovider_timeout_seconds: 15\nsecondary_timeout_seconds: -5\n",
+            "secondary_timeout_seconds",
+        ),
+    ],
+)
+def test_load_settings_rejects_invalid_provider_values(
+    tmp_path: Path, providers: str, expected_field: str
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    write_config(config_dir, providers=providers)
+
+    with pytest.raises(ValidationError, match=expected_field):
+        load_settings(config_dir)
+
+
+def test_load_settings_rejects_malformed_app_yaml_with_validation_error(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    write_config(config_dir, app="- mode: paper\n")
+
+    with pytest.raises(ValidationError):
+        load_settings(config_dir)
+
+
+def test_load_settings_rejects_invalid_mode_from_app_yaml(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    write_config(
+        config_dir,
+        app="mode: dry_run\nlive_enabled: false\nibkr:\n  host: 127.0.0.1\n  port: 7497\n  client_id: 7\naudit_db_path: runtime/audit.db\n",
+    )
+
+    with pytest.raises(ValidationError, match="mode"):
+        load_settings(config_dir)
+
+
+def test_load_settings_rejects_invalid_mode_env(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    write_config(config_dir)
+
+    monkeypatch.setenv("TRADER_SHAWN_MODE", "dry_run")
+
+    with pytest.raises(ValidationError, match="mode"):
+        load_settings(config_dir)
