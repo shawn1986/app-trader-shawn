@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, fields, is_dataclass
+from datetime import date, datetime
+from enum import Enum
 import json
 import math
 from pathlib import Path
@@ -7,17 +10,66 @@ from typing import Any, Sequence
 
 import click
 
-from trader_shawn.candidate_builder.credit_spread_builder import (
-    MAX_ABS_DELTA,
-    MAX_BID_ASK_RATIO,
-    MAX_WIDTH,
-    MIN_ABS_DELTA,
-    MIN_OPEN_INTEREST,
-    MIN_VOLUME,
-)
+from trader_shawn.ai.claude_cli_adapter import ClaudeCliAdapter
+from trader_shawn.ai.codex_adapter import CodexAdapter
+from trader_shawn.ai.service import AiDecisionService
+from trader_shawn.candidate_builder.credit_spread_builder import build_candidates
 from trader_shawn.domain.enums import DecisionAction
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread
+from trader_shawn.events.earnings_calendar import EarningsCalendar
+from trader_shawn.execution.ibkr_executor import IbkrExecutor
+from trader_shawn.market_data.ibkr_market_data import IbkrMarketDataClient
+from trader_shawn.monitoring.dashboard_api import read_dashboard_snapshot, update_dashboard_state
+from trader_shawn.risk.guard import RiskGuard
 from trader_shawn.settings import AppSettings, load_settings
+
+
+@dataclass(slots=True)
+class CliRuntime:
+    settings: AppSettings
+    config_dir: Path
+    scanner: Any | None = None
+    account_service: Any | None = None
+    decision_service: Any | None = None
+    executor: Any | None = None
+    risk_guard: Any | None = None
+    position_service: Any | None = None
+    position_manager: Any | None = None
+    dashboard_state_path: Path | None = None
+
+
+class CliScanner:
+    def __init__(
+        self,
+        *,
+        market_data_client: IbkrMarketDataClient,
+        earnings_calendar: EarningsCalendar,
+    ) -> None:
+        self._market_data_client = market_data_client
+        self._earnings_calendar = earnings_calendar
+
+    def scan_candidates(self, symbols: list[str]) -> list[CandidateSpread]:
+        as_of = date.today()
+        candidates: list[CandidateSpread] = []
+        for symbol in symbols:
+            quotes = self._market_data_client.fetch_option_quotes(symbol)
+            quotes_by_expiry: dict[str, list[Any]] = {}
+            for quote in quotes:
+                quotes_by_expiry.setdefault(quote.expiry, []).append(quote)
+            for expiry, expiry_quotes in sorted(quotes_by_expiry.items()):
+                dte = (date.fromisoformat(expiry) - as_of).days
+                if dte < 0:
+                    continue
+                candidates.extend(
+                    build_candidates(
+                        symbol,
+                        dte,
+                        expiry_quotes,
+                        earnings_calendar=self._earnings_calendar,
+                        as_of=as_of,
+                    )
+                )
+        return candidates
 
 
 def run_trade_cycle(
@@ -199,118 +251,141 @@ def _error_result(*, status: str, reason: str, exc: Exception) -> dict[str, str]
     }
 
 
+def build_cli_runtime() -> CliRuntime:
+    config_dir = _default_config_dir()
+    settings = load_settings(config_dir)
+    market_data_client = IbkrMarketDataClient(
+        host=settings.ibkr.host,
+        port=settings.ibkr.port,
+        client_id=settings.ibkr.client_id,
+    )
+    earnings_calendar = EarningsCalendar(settings.events)
+    return CliRuntime(
+        settings=settings,
+        config_dir=config_dir,
+        scanner=CliScanner(
+            market_data_client=market_data_client,
+            earnings_calendar=earnings_calendar,
+        ),
+        account_service=market_data_client,
+        decision_service=_build_decision_service(settings),
+        executor=IbkrExecutor(
+            host=settings.ibkr.host,
+            port=settings.ibkr.port,
+            client_id=settings.ibkr.client_id,
+        ),
+        risk_guard=RiskGuard(settings.risk),
+        position_service=market_data_client,
+        dashboard_state_path=(config_dir.parent / "runtime" / "dashboard.json").resolve(),
+    )
+
+
 def _trade_cycle_command() -> dict[str, Any]:
-    settings, config_dir = _load_command_settings()
-    if settings is None:
-        return config_dir
-    return {
-        **_command_envelope("trade-cycle", settings=settings, config_dir=config_dir),
-        "workflow": {
-            "entry_order_path": "open_credit_spread_combo",
-            "fail_closed_without_risk_guard": True,
-            "manage_command_available": True,
-            "scan_command_available": True,
-        },
-        "limitations": [
-            "CLI trade-cycle reports the configured orchestration contract only; scan, AI decisions, account snapshots, and broker side effects still require explicit composition."
-        ],
-    }
+    runtime, error = _load_command_runtime()
+    if error is not None:
+        return error
+    result = _execute_entry_workflow("trade-cycle", runtime)
+    _update_dashboard_snapshot(runtime, result)
+    return result
 
 
 def _scan_command() -> dict[str, Any]:
-    settings, config_dir = _load_command_settings()
-    if settings is None:
-        return config_dir
+    runtime, error = _load_command_runtime()
+    if error is not None:
+        return error
+    candidates, candidate_error = _scan_candidates(runtime, command="scan")
+    if candidate_error is not None:
+        return candidate_error
     return {
-        **_command_envelope("scan", settings=settings, config_dir=config_dir),
-        "symbols": settings.symbols,
-        "candidate_builder": {
-            "strategy": "bull_put_credit_spread",
-            "min_open_interest": MIN_OPEN_INTEREST,
-            "min_volume": MIN_VOLUME,
-            "min_abs_delta": MIN_ABS_DELTA,
-            "max_abs_delta": MAX_ABS_DELTA,
-            "max_width": MAX_WIDTH,
-            "max_bid_ask_ratio": MAX_BID_ASK_RATIO,
-        },
-        "limitations": [
-            "CLI scan reports configured symbol universe and candidate filters only; live market data retrieval is not composed here."
-        ],
+        **_command_envelope("scan", runtime=runtime),
+        "status": "ok",
+        "candidate_count": len(candidates),
+        "candidates": _json_safe(candidates),
     }
 
 
 def _decide_command() -> dict[str, Any]:
-    settings, config_dir = _load_command_settings()
-    if settings is None:
-        return config_dir
+    runtime, error = _load_command_runtime()
+    if error is not None:
+        return error
+
+    candidates, candidate_error = _scan_candidates(runtime, command="decide")
+    if candidate_error is not None:
+        return candidate_error
+    if not candidates:
+        return {
+            **_command_envelope("decide", runtime=runtime),
+            "status": "no_candidates",
+            "candidate_count": 0,
+            "candidates": [],
+        }
+
+    decision, decision_error = _decide_on_candidates(runtime, candidates, command="decide")
+    if decision_error is not None:
+        return decision_error
     return {
-        **_command_envelope("decide", settings=settings, config_dir=config_dir),
-        "decision": {
-            "provider_mode": settings.providers.provider_mode,
-            "primary_provider": settings.providers.primary_provider,
-            "secondary_provider": settings.providers.secondary_provider,
-            "timeout_seconds": settings.providers.provider_timeout_seconds,
-            "secondary_timeout_seconds": settings.providers.secondary_timeout_seconds,
-        },
-        "limitations": [
-            "CLI decide reports configured AI provider routing only; candidate generation and live provider execution are not composed here."
-        ],
+        **_command_envelope("decide", runtime=runtime),
+        "status": "ok",
+        "candidate_count": len(candidates),
+        "candidates": _json_safe(candidates),
+        "decision": _json_safe(decision),
     }
 
 
 def _trade_command() -> dict[str, Any]:
-    settings, config_dir = _load_command_settings()
-    if settings is None:
-        return config_dir
-    return {
-        **_command_envelope("trade", settings=settings, config_dir=config_dir),
-        "execution": {
-            "broker": "ibkr",
-            "entry_path": "open_credit_spread_combo",
-            "host": settings.ibkr.host,
-            "port": settings.ibkr.port,
-        },
-        "risk": {
-            "guard_required": True,
-            "max_risk_per_trade_pct": settings.risk.max_risk_per_trade_pct,
-            "max_daily_loss_pct": settings.risk.max_daily_loss_pct,
-            "max_open_risk_pct": settings.risk.max_open_risk_pct,
-            "max_spreads_per_symbol": settings.risk.max_spreads_per_symbol,
-        },
-        "limitations": [
-            "CLI trade reports execution and risk settings only; it does not build candidates, request approvals, or submit a broker order by itself."
-        ],
-    }
+    runtime, error = _load_command_runtime()
+    if error is not None:
+        return error
+    result = _execute_entry_workflow("trade", runtime)
+    _update_dashboard_snapshot(runtime, result)
+    return result
 
 
 def _manage_command() -> dict[str, Any]:
-    settings, config_dir = _load_command_settings()
-    if settings is None:
-        return config_dir
+    runtime, error = _load_command_runtime()
+    if error is not None:
+        return error
+
+    manager = getattr(runtime, "position_manager", None)
+    manage_positions = _resolve_runtime_method(manager, "manage_positions")
+    if manage_positions is None:
+        return _runtime_unavailable(
+            "manage",
+            runtime=runtime,
+            reason="position_management_not_supported",
+        )
+
+    try:
+        result = manage_positions()
+    except Exception as exc:
+        return _command_exception(
+            "manage",
+            runtime=runtime,
+            status="manage_error",
+            reason="position_management_failed",
+            exc=exc,
+        )
+
+    if not isinstance(result, dict):
+        result = {"status": "ok", "payload": _json_safe(result)}
     return {
-        **_command_envelope("manage", settings=settings, config_dir=config_dir),
-        "exit_rules": {
-            "profit_take_pct": settings.risk.profit_take_pct,
-            "stop_loss_multiple": settings.risk.stop_loss_multiple,
-            "exit_dte_threshold": settings.risk.exit_dte_threshold,
-            "supported_order_path": "close_credit_spread_combo",
-        },
-        "limitations": [
-            "CLI manage reports configured exit rules only; fetching live positions and submitting close orders are not composed here."
-        ],
+        **_command_envelope("manage", runtime=runtime),
+        **_json_safe(result),
     }
 
 
 def _dashboard_command(state_path: str | Path) -> dict[str, Any]:
-    from trader_shawn.monitoring.dashboard_api import read_dashboard_snapshot
-
     return read_dashboard_snapshot(state_path)
 
 
-def _load_command_settings() -> tuple[AppSettings | None, Path | dict[str, Any]]:
-    config_dir = (Path.cwd() / "config").resolve()
+def _default_config_dir() -> Path:
+    return (Path.cwd() / "config").resolve()
+
+
+def _load_command_runtime() -> tuple[CliRuntime | None, dict[str, Any] | None]:
+    config_dir = _default_config_dir()
     try:
-        return load_settings(config_dir), config_dir
+        return build_cli_runtime(), None
     except Exception as exc:
         return None, {
             "status": "error",
@@ -324,16 +399,274 @@ def _load_command_settings() -> tuple[AppSettings | None, Path | dict[str, Any]]
 def _command_envelope(
     command: str,
     *,
-    settings: AppSettings,
-    config_dir: Path,
+    runtime: CliRuntime,
 ) -> dict[str, Any]:
     return {
-        "status": "ok",
         "command": command,
-        "mode": settings.mode,
-        "live_enabled": settings.live_enabled,
-        "config_dir": str(config_dir),
+        "mode": runtime.settings.mode,
+        "live_enabled": runtime.settings.live_enabled,
+        "config_dir": str(runtime.config_dir),
     }
+
+
+def _build_decision_service(settings: AppSettings) -> AiDecisionService:
+    primary = _build_ai_provider(
+        settings.providers.primary_provider,
+        timeout_seconds=settings.providers.provider_timeout_seconds,
+    )
+    secondary = _build_ai_provider(
+        settings.providers.secondary_provider,
+        timeout_seconds=settings.providers.secondary_timeout_seconds,
+    )
+    return AiDecisionService(primary=primary, secondary=secondary)
+
+
+def _build_ai_provider(provider_name: str, *, timeout_seconds: int) -> Any:
+    normalized = provider_name.strip().lower()
+    if normalized == "claude_cli":
+        return ClaudeCliAdapter(timeout_seconds=timeout_seconds)
+    if normalized == "codex":
+        return CodexAdapter(timeout_seconds=timeout_seconds)
+    raise ValueError(f"unsupported AI provider: {provider_name}")
+
+
+def _execute_entry_workflow(command: str, runtime: CliRuntime) -> dict[str, Any]:
+    candidates, candidate_error = _scan_candidates(runtime, command=command)
+    if candidate_error is not None:
+        return candidate_error
+
+    if candidates:
+        if getattr(runtime, "decision_service", None) is None:
+            return _runtime_unavailable(command, runtime=runtime, reason="decision_service_unavailable")
+        if getattr(runtime, "account_service", None) is None:
+            return _runtime_unavailable(command, runtime=runtime, reason="account_service_unavailable")
+        if getattr(runtime, "position_service", None) is None:
+            return _runtime_unavailable(command, runtime=runtime, reason="position_service_unavailable")
+        if getattr(runtime, "executor", None) is None:
+            return _runtime_unavailable(command, runtime=runtime, reason="executor_unavailable")
+
+    account, account_error = _fetch_account_snapshot(runtime, command=command)
+    if account_error is not None:
+        return account_error
+
+    open_symbol_count, position_error = _count_open_symbol_positions(
+        runtime,
+        ticker=candidates[0].ticker if candidates else "",
+        command=command,
+    )
+    if position_error is not None:
+        return position_error
+
+    result = run_trade_cycle(
+        candidates=candidates,
+        account=account,
+        decision_service=runtime.decision_service,
+        executor=runtime.executor,
+        risk_guard=runtime.risk_guard,
+        open_symbol_count=open_symbol_count,
+    )
+    return {
+        **_command_envelope(command, runtime=runtime),
+        **_json_safe(result),
+    }
+
+
+def _scan_candidates(
+    runtime: CliRuntime,
+    *,
+    command: str,
+) -> tuple[list[CandidateSpread], dict[str, Any] | None]:
+    scan_candidates = _resolve_runtime_method(
+        getattr(runtime, "scanner", None),
+        "scan_candidates",
+        "scan_option_candidates",
+    )
+    if scan_candidates is None:
+        return [], _runtime_unavailable(command, runtime=runtime, reason="scan_service_unavailable")
+
+    try:
+        candidates = scan_candidates(list(runtime.settings.symbols))
+    except Exception as exc:
+        return [], _command_exception(
+            command,
+            runtime=runtime,
+            status="scan_error",
+            reason="scan_failed",
+            exc=exc,
+        )
+
+    return list(candidates), None
+
+
+def _decide_on_candidates(
+    runtime: CliRuntime,
+    candidates: Sequence[CandidateSpread],
+    *,
+    command: str,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    decision_service = getattr(runtime, "decision_service", None)
+    if decision_service is None:
+        return None, _runtime_unavailable(command, runtime=runtime, reason="decision_service_unavailable")
+
+    context = {
+        "ticker": candidates[0].ticker,
+        "candidate": candidates[0],
+        "candidates": list(candidates),
+    }
+    try:
+        return decision_service.decide(context), None
+    except Exception as exc:
+        return None, _command_exception(
+            command,
+            runtime=runtime,
+            status="decision_error",
+            reason="decision_service_failed",
+            exc=exc,
+        )
+
+
+def _fetch_account_snapshot(
+    runtime: CliRuntime,
+    *,
+    command: str,
+) -> tuple[AccountSnapshot, dict[str, Any] | None]:
+    fetch_account_snapshot = _resolve_runtime_method(
+        getattr(runtime, "account_service", None),
+        "fetch_account_snapshot",
+        "get_account_snapshot",
+    )
+    if fetch_account_snapshot is None:
+        return AccountSnapshot(), None
+
+    try:
+        return fetch_account_snapshot(), None
+    except Exception as exc:
+        return AccountSnapshot(), _command_exception(
+            command,
+            runtime=runtime,
+            status="account_error",
+            reason="account_snapshot_failed",
+            exc=exc,
+        )
+
+
+def _count_open_symbol_positions(
+    runtime: CliRuntime,
+    *,
+    ticker: str,
+    command: str,
+) -> tuple[int, dict[str, Any] | None]:
+    if not ticker:
+        return 0, None
+
+    count_open_positions = _resolve_runtime_method(
+        getattr(runtime, "position_service", None),
+        "count_open_option_positions",
+        "count_open_positions",
+    )
+    if count_open_positions is None:
+        return 0, None
+
+    try:
+        return int(count_open_positions(ticker)), None
+    except TypeError:
+        try:
+            return int(count_open_positions(symbol=ticker)), None
+        except Exception as exc:
+            return 0, _command_exception(
+                command,
+                runtime=runtime,
+                status="position_error",
+                reason="open_position_count_failed",
+                exc=exc,
+            )
+    except Exception as exc:
+        return 0, _command_exception(
+            command,
+            runtime=runtime,
+            status="position_error",
+            reason="open_position_count_failed",
+            exc=exc,
+        )
+
+
+def _resolve_runtime_method(service: Any, *names: str) -> Any | None:
+    for name in names:
+        method = getattr(service, name, None)
+        if callable(method):
+            return method
+    return None
+
+
+def _runtime_unavailable(
+    command: str,
+    *,
+    runtime: CliRuntime,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        **_command_envelope(command, runtime=runtime),
+        "status": "runtime_unavailable",
+        "reason": reason,
+    }
+
+
+def _command_exception(
+    command: str,
+    *,
+    runtime: CliRuntime,
+    status: str,
+    reason: str,
+    exc: Exception,
+) -> dict[str, Any]:
+    return {
+        **_command_envelope(command, runtime=runtime),
+        **_error_result(status=status, reason=reason, exc=exc),
+    }
+
+
+def _update_dashboard_snapshot(runtime: CliRuntime, result: dict[str, Any]) -> None:
+    state_path = getattr(runtime, "dashboard_state_path", None)
+    if state_path is None:
+        return
+
+    try:
+        update_dashboard_state(state_path, last_cycle=result)
+    except Exception:
+        return
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value):
+        return {
+            item.name: _json_safe(getattr(value, item.name))
+            for item in fields(value)
+        }
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+
+    public_attrs = {
+        name: _json_safe(getattr(value, name))
+        for name in dir(value)
+        if not name.startswith("_")
+        and not callable(getattr(value, name))
+    }
+    if public_attrs:
+        return public_attrs
+    return value
 
 
 if __name__ == "__main__":

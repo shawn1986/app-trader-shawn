@@ -192,3 +192,25 @@ def test_load_settings_rejects_invalid_mode_env(monkeypatch, tmp_path: Path) -> 
 
     with pytest.raises(ValidationError, match="mode"):
         load_settings(config_dir)
+
+
+def test_load_settings_rejects_live_mode_when_live_disabled(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    write_config(config_dir)
+
+    monkeypatch.setenv("TRADER_SHAWN_MODE", "live")
+    monkeypatch.setenv("TRADER_SHAWN_LIVE_ENABLED", "false")
+
+    with pytest.raises(ValidationError) as exc_info:
+        load_settings(config_dir)
+
+    errors = exc_info.value.errors(include_url=False)
+
+    assert len(errors) == 1
+    assert errors[0]["loc"] == ()
+    assert errors[0]["type"] == "live_mode_requires_live_enabled"
+    assert errors[0]["msg"] == "live_enabled must be true when mode=live"
+    assert errors[0]["ctx"] == {"mode": "live"}

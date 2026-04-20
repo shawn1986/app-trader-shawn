@@ -3,9 +3,11 @@ from __future__ import annotations
 import math
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from click.testing import CliRunner
 
+import trader_shawn.app as app_module
 from trader_shawn.app import cli, run_trade_cycle
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread
 from trader_shawn.execution.ibkr_executor import IbkrExecutor
@@ -126,6 +128,123 @@ class PayloadDecisionService:
         return type("Decision", (), self.payload)()
 
 
+class FakeScanner:
+    def __init__(self, candidates: list[CandidateSpread]) -> None:
+        self.candidates = list(candidates)
+        self.calls: list[list[str]] = []
+
+    def scan_candidates(self, symbols: list[str]) -> list[CandidateSpread]:
+        self.calls.append(list(symbols))
+        return list(self.candidates)
+
+
+class FakeAccountService:
+    def __init__(self, snapshot: AccountSnapshot) -> None:
+        self.snapshot = snapshot
+        self.calls = 0
+
+    def fetch_account_snapshot(self) -> AccountSnapshot:
+        self.calls += 1
+        return self.snapshot
+
+
+class FakePositionService:
+    def __init__(self, *, open_symbol_count: int = 0) -> None:
+        self.open_symbol_count = open_symbol_count
+        self.count_calls: list[str] = []
+
+    def count_open_option_positions(self, ticker: str) -> int:
+        self.count_calls.append(ticker)
+        return self.open_symbol_count
+
+
+class _FakeOption:
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        lastTradeDateOrContractMonth: str,
+        strike: float,
+        right: str,
+        exchange: str,
+        currency: str,
+    ) -> None:
+        self.symbol = symbol
+        self.lastTradeDateOrContractMonth = lastTradeDateOrContractMonth
+        self.strike = strike
+        self.right = right
+        self.exchange = exchange
+        self.currency = currency
+        self.conId = 0
+
+
+class _FakeComboLeg:
+    def __init__(self, *, conId: int, ratio: int, action: str, exchange: str) -> None:
+        self.conId = conId
+        self.ratio = ratio
+        self.action = action
+        self.exchange = exchange
+
+
+class _FakeContract:
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        secType: str,
+        currency: str,
+        exchange: str,
+        comboLegs: list[_FakeComboLeg],
+    ) -> None:
+        self.symbol = symbol
+        self.secType = secType
+        self.currency = currency
+        self.exchange = exchange
+        self.comboLegs = comboLegs
+
+
+class _FakeLimitOrder:
+    def __init__(
+        self,
+        action: str,
+        totalQuantity: int,
+        lmtPrice: float,
+        *,
+        transmit: bool,
+    ) -> None:
+        self.action = action
+        self.totalQuantity = totalQuantity
+        self.lmtPrice = lmtPrice
+        self.transmit = transmit
+        self.orderType = "LMT"
+        self.orderId = 404
+
+
+class _FakeIbModule:
+    Option = _FakeOption
+    ComboLeg = _FakeComboLeg
+    Contract = _FakeContract
+    LimitOrder = _FakeLimitOrder
+
+
+class _FakeIbClient:
+    def qualifyContracts(self, *contracts: _FakeOption) -> list[_FakeOption]:
+        for contract in contracts:
+            contract.conId = 50000 + int(contract.strike)
+        return list(contracts)
+
+    def placeOrder(self, contract: _FakeContract, order: _FakeLimitOrder):
+        return type(
+            "Trade",
+            (),
+            {
+                "contract": contract,
+                "order": order,
+                "orderStatus": type("OrderStatus", (), {"status": "PendingSubmit"})(),
+            },
+        )()
+
+
 def _spread(
     *,
     ticker: str = "AMD",
@@ -161,6 +280,54 @@ def _account() -> AccountSnapshot:
     )
 
 
+def _settings(*, symbols: list[str] | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        mode="paper",
+        live_enabled=False,
+        symbols=symbols or ["SPY", "QQQ", "AMD"],
+        risk=SimpleNamespace(
+            max_risk_per_trade_pct=0.02,
+            max_daily_loss_pct=0.04,
+            max_open_risk_pct=0.2,
+            max_spreads_per_symbol=2,
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        providers=SimpleNamespace(
+            provider_mode="claude_primary",
+            primary_provider="claude_cli",
+            secondary_provider="codex",
+            provider_timeout_seconds=15,
+            secondary_timeout_seconds=10,
+        ),
+        ibkr=SimpleNamespace(host="127.0.0.1", port=7497),
+    )
+
+
+def _runtime(
+    *,
+    scanner: FakeScanner | None = None,
+    decision_service: object | None = None,
+    account_service: FakeAccountService | None = None,
+    position_service: FakePositionService | None = None,
+    risk_guard: object | None = None,
+    executor: object | None = None,
+    dashboard_state_path: Path | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        settings=_settings(),
+        config_dir=(Path.cwd() / "config").resolve(),
+        scanner=scanner,
+        decision_service=decision_service,
+        account_service=account_service,
+        position_service=position_service,
+        risk_guard=risk_guard,
+        executor=executor,
+        dashboard_state_path=dashboard_state_path,
+    )
+
+
 def test_run_trade_cycle_returns_no_candidates_without_decision_or_submission() -> None:
     decision_service = StubDecisionService()
     executor = StubExecutor()
@@ -186,6 +353,98 @@ def test_cli_is_invokable_via_click_runner() -> None:
     assert result.exit_code == 0
     assert "trade-cycle" in result.output
     assert "dashboard" in result.output
+
+
+def test_trade_cycle_command_executes_workflow_and_updates_dashboard(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+    scanner = FakeScanner([candidate])
+    account_service = FakeAccountService(_account())
+    position_service = FakePositionService(open_symbol_count=1)
+    executor = StubExecutor()
+    decision_service = StubDecisionService(limit_credit=1.10)
+    risk_guard = StubRiskGuard(allowed=True)
+    state_path = tmp_path / "dashboard.json"
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=scanner,
+            decision_service=decision_service,
+            account_service=account_service,
+            position_service=position_service,
+            risk_guard=risk_guard,
+            executor=executor,
+            dashboard_state_path=state_path,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade-cycle"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+
+    assert payload["status"] == "submitted"
+    assert payload["command"] == "trade-cycle"
+    assert payload["payload"]["symbol"] == "AMD"
+    assert scanner.calls == [["SPY", "QQQ", "AMD"]]
+    assert account_service.calls == 1
+    assert position_service.count_calls == ["AMD"]
+    assert executor.open_calls[0][0] is candidate
+    assert read_dashboard_snapshot(state_path) == {
+        "status": "updated",
+        "last_cycle": {
+            "status": "submitted",
+            "payload": {
+                "symbol": "AMD",
+                "expiry": "2026-04-30",
+                "short_strike": 160,
+                "long_strike": 155,
+            },
+        },
+        "error": None,
+    }
+
+
+def test_trade_cycle_command_records_risk_rejection_in_dashboard(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    scanner = FakeScanner([_spread()])
+    state_path = tmp_path / "dashboard.json"
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=scanner,
+            decision_service=StubDecisionService(),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=0),
+            risk_guard=StubRiskGuard(allowed=False, reason="max_open_risk_pct"),
+            executor=StubExecutor(),
+            dashboard_state_path=state_path,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade-cycle"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "command": "trade-cycle",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "live_enabled": False,
+        "mode": "paper",
+        "reason": "max_open_risk_pct",
+        "status": "risk_rejected",
+    }
+    assert read_dashboard_snapshot(state_path) == {
+        "status": "updated",
+        "last_cycle": {
+            "status": "risk_rejected",
+            "reason": "max_open_risk_pct",
+        },
+        "error": None,
+    }
 
 
 def test_run_trade_cycle_stops_when_decision_is_not_approve() -> None:
@@ -414,35 +673,49 @@ def test_run_trade_cycle_uses_sell_to_open_combo_with_ibkr_executor() -> None:
         candidates=[_spread()],
         account=_account(),
         decision_service=StubDecisionService(limit_credit=1.15),
-        executor=IbkrExecutor(),
+        executor=IbkrExecutor(
+            client=_FakeIbClient(),
+            ibkr_module=_FakeIbModule(),
+        ),
         risk_guard=StubRiskGuard(allowed=True),
     )
 
-    assert result["status"] == "stubbed"
+    assert result["status"] == "submitted"
     assert result["broker"] == "ibkr"
-    assert result["order"]["legs"] == [
+    assert result["contract"] == {
+        "symbol": "AMD",
+        "secType": "BAG",
+        "currency": "USD",
+        "exchange": "SMART",
+    }
+    assert result["legs"] == [
         {
+            "con_id": 50160,
             "action": "SELL",
             "ratio": 1,
+            "exchange": "SMART",
             "right": "P",
-            "strike": 160,
+            "strike": 160.0,
             "expiry": "2026-04-30",
         },
         {
+            "con_id": 50155,
             "action": "BUY",
             "ratio": 1,
+            "exchange": "SMART",
             "right": "P",
-            "strike": 155,
+            "strike": 155.0,
             "expiry": "2026-04-30",
         },
     ]
-    assert result["order"]["order"] == {
+    assert result["order"] == {
         "action": "SELL",
         "orderType": "LMT",
         "totalQuantity": 1,
         "lmtPrice": 1.15,
-        "transmit": False,
+        "transmit": True,
     }
+    assert result["broker_status"] == "PendingSubmit"
 
 
 def test_run_trade_cycle_returns_structured_error_when_executor_raises() -> None:

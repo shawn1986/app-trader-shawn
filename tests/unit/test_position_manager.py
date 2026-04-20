@@ -405,12 +405,136 @@ def test_ibkr_executor_submit_limit_combo_returns_stubbed_submission_record() ->
         dte=9,
         short_leg_distance_pct=0.08,
     )
-    executor = IbkrExecutor()
+    executor = IbkrExecutor(
+        client=_FakeIbClient(),
+        ibkr_module=_FakeIbModule(),
+    )
 
     result = executor.submit_limit_combo(position, limit_price=0.45)
 
     assert result == {
-        "status": "stubbed",
+        "status": "submitted",
         "broker": "ibkr",
-        "order": build_credit_spread_combo_order(position, limit_price=0.45),
+        "order_id": 404,
+        "order": {
+            "action": "BUY",
+            "orderType": "LMT",
+            "totalQuantity": 1,
+            "lmtPrice": 0.45,
+            "transmit": True,
+        },
+        "contract": {
+            "symbol": "AMD",
+            "secType": "BAG",
+            "currency": "USD",
+            "exchange": "SMART",
+        },
+        "legs": [
+            {
+                "con_id": 50160,
+                "action": "BUY",
+                "ratio": 1,
+                "exchange": "SMART",
+                "right": "P",
+                "strike": 160.0,
+                "expiry": "2026-04-30",
+            },
+            {
+                "con_id": 50155,
+                "action": "SELL",
+                "ratio": 1,
+                "exchange": "SMART",
+                "right": "P",
+                "strike": 155.0,
+                "expiry": "2026-04-30",
+            },
+        ],
+        "broker_status": "PendingSubmit",
     }
+
+
+class _FakeOption:
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        lastTradeDateOrContractMonth: str,
+        strike: float,
+        right: str,
+        exchange: str,
+        currency: str,
+    ) -> None:
+        self.symbol = symbol
+        self.lastTradeDateOrContractMonth = lastTradeDateOrContractMonth
+        self.strike = strike
+        self.right = right
+        self.exchange = exchange
+        self.currency = currency
+        self.conId = 0
+
+
+class _FakeComboLeg:
+    def __init__(self, *, conId: int, ratio: int, action: str, exchange: str) -> None:
+        self.conId = conId
+        self.ratio = ratio
+        self.action = action
+        self.exchange = exchange
+
+
+class _FakeContract:
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        secType: str,
+        currency: str,
+        exchange: str,
+        comboLegs: list[_FakeComboLeg],
+    ) -> None:
+        self.symbol = symbol
+        self.secType = secType
+        self.currency = currency
+        self.exchange = exchange
+        self.comboLegs = comboLegs
+
+
+class _FakeLimitOrder:
+    def __init__(
+        self,
+        action: str,
+        totalQuantity: int,
+        lmtPrice: float,
+        *,
+        transmit: bool,
+    ) -> None:
+        self.action = action
+        self.totalQuantity = totalQuantity
+        self.lmtPrice = lmtPrice
+        self.transmit = transmit
+        self.orderType = "LMT"
+        self.orderId = 404
+
+
+class _FakeIbModule:
+    Option = _FakeOption
+    ComboLeg = _FakeComboLeg
+    Contract = _FakeContract
+    LimitOrder = _FakeLimitOrder
+
+
+class _FakeIbClient:
+    def qualifyContracts(self, *contracts: _FakeOption) -> list[_FakeOption]:
+        for contract in contracts:
+            contract.conId = 50000 + int(contract.strike)
+        return list(contracts)
+
+    def placeOrder(self, contract: _FakeContract, order: _FakeLimitOrder):
+        return type(
+            "Trade",
+            (),
+            {
+                "contract": contract,
+                "order": order,
+                "orderStatus": type("OrderStatus", (), {"status": "PendingSubmit"})(),
+            },
+        )()
