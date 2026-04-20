@@ -41,8 +41,10 @@ class PositionManager:
         if reconciliation["status"] == "anomaly":
             return reconciliation
 
+        matched_positions = list(reconciliation["matched_positions"])
+        closing_to_close = list(reconciliation["closing_to_close"])
         staged_evaluations: list[dict[str, Any]] = []
-        for managed_position in managed_positions:
+        for managed_position in matched_positions:
             snapshot = self._build_snapshot(managed_position)
             exit_reason = evaluate_exit(
                 snapshot,
@@ -90,6 +92,24 @@ class PositionManager:
             self._audit_logger.update_managed_position(
                 managed_position["position_id"],
                 **updates,
+            )
+
+        for managed_position in closing_to_close:
+            recorded_at = datetime.now(UTC)
+            self._audit_logger.update_managed_position(
+                managed_position["position_id"],
+                status="closed",
+                closed_at=recorded_at.isoformat(),
+                last_evaluated_at=recorded_at.isoformat(),
+            )
+            self._audit_logger.record_position_event(
+                managed_position["position_id"],
+                "closed",
+                {
+                    "reason": "broker_position_missing",
+                    "broker_fingerprint": managed_position["broker_fingerprint"],
+                },
+                created_at=recorded_at,
             )
 
         if submission_target is not None and submission is not None:
@@ -227,38 +247,52 @@ def _reconcile_positions(
     managed_positions: list[dict[str, Any]],
     broker_positions: list[BrokerOptionPosition],
 ) -> dict[str, object]:
-    if not managed_positions and broker_positions:
-        broker_identities = _broker_identities(broker_positions)
-        return _anomaly_result(
-            reason="unknown_broker_position",
-            fingerprints=(
-                []
-                if broker_identities is None
-                else _identity_fingerprints(broker_identities)
-            ),
-        )
-
-    broker_identities = _broker_identities(broker_positions)
-    if broker_identities is None:
-        return _anomaly_result(
-            reason="unknown_broker_position",
-            fingerprints=[],
-        )
-
-    remaining_identities = set(broker_identities)
+    available_legs = [_broker_leg_key(position) for position in broker_positions]
+    matched_positions: list[dict[str, Any]] = []
+    closing_to_close: list[dict[str, Any]] = []
     missing_fingerprints: list[str] = []
+    unknown_fingerprints: set[str] = set()
+
     for managed_position in managed_positions:
         identity = _managed_identity(managed_position)
         stored_identity = _stored_identity(managed_position)
         if stored_identity != identity:
-            missing_fingerprints.append(identity[0])
-            if identity in remaining_identities:
-                remaining_identities.remove(identity)
+            unknown_fingerprints.add(identity[0])
+            stored_leg_indexes = _find_stored_leg_indexes(
+                available_legs,
+                managed_position=managed_position,
+            )
+            if stored_leg_indexes is not None:
+                _remove_matched_legs(available_legs, stored_leg_indexes)
             continue
-        if identity not in remaining_identities:
+
+        leg_indexes = _find_matching_leg_indexes(
+            available_legs,
+            managed_position=managed_position,
+        )
+        if leg_indexes is None:
+            if managed_position["status"] == "closing":
+                closing_to_close.append(managed_position)
+                continue
             missing_fingerprints.append(identity[0])
             continue
-        remaining_identities.remove(identity)
+
+        _remove_matched_legs(available_legs, leg_indexes)
+        matched_positions.append(managed_position)
+
+    leftover_fingerprints = _leftover_broker_fingerprints(available_legs)
+    if leftover_fingerprints is None:
+        return _anomaly_result(
+            reason="unknown_broker_position",
+            fingerprints=sorted(unknown_fingerprints),
+        )
+    unknown_fingerprints.update(leftover_fingerprints)
+
+    if unknown_fingerprints:
+        return _anomaly_result(
+            reason="unknown_broker_position",
+            fingerprints=sorted(unknown_fingerprints),
+        )
 
     if missing_fingerprints:
         return _anomaly_result(
@@ -266,13 +300,11 @@ def _reconcile_positions(
             fingerprints=sorted(missing_fingerprints),
         )
 
-    if remaining_identities:
-        return _anomaly_result(
-            reason="unknown_broker_position",
-            fingerprints=_identity_fingerprints(remaining_identities),
-        )
-
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "matched_positions": matched_positions,
+        "closing_to_close": closing_to_close,
+    }
 
 
 def _anomaly_result(*, reason: str, fingerprints: list[str]) -> dict[str, object]:
@@ -316,53 +348,201 @@ def _managed_fingerprint(managed_position: dict[str, Any]) -> str:
     )
 
 
-def _broker_identities(
-    broker_positions: list[BrokerOptionPosition],
-) -> set[tuple[str, str]] | None:
-    grouped_positions: dict[
+def _broker_leg_key(
+    broker_position: BrokerOptionPosition,
+) -> tuple[str, str, str, int, float]:
+    if broker_position.short_strike is None:
+        raise ValueError("broker option position is missing strike")
+    return (
+        broker_position.ticker,
+        broker_position.expiry,
+        broker_position.right,
+        int(broker_position.quantity),
+        float(broker_position.short_strike),
+    )
+
+
+def _find_matching_leg_indexes(
+    available_legs: list[tuple[str, str, str, int, float]],
+    *,
+    managed_position: dict[str, Any],
+) -> tuple[int, int] | None:
+    short_leg, long_leg = _expected_broker_leg_keys(managed_position)
+    short_index = _find_leg_index(available_legs, short_leg)
+    if short_index is None:
+        return None
+    long_index = _find_leg_index(
+        available_legs,
+        long_leg,
+        skip_index=short_index,
+    )
+    if long_index is None:
+        return None
+    return short_index, long_index
+
+
+def _find_stored_leg_indexes(
+    available_legs: list[tuple[str, str, str, int, float]],
+    *,
+    managed_position: dict[str, Any],
+) -> tuple[int, int] | None:
+    stored_leg_keys = _stored_broker_leg_keys(managed_position)
+    if stored_leg_keys is None:
+        return None
+    short_leg, long_leg = stored_leg_keys
+    short_index = _find_leg_index(available_legs, short_leg)
+    if short_index is None:
+        return None
+    long_index = _find_leg_index(
+        available_legs,
+        long_leg,
+        skip_index=short_index,
+    )
+    if long_index is None:
+        return None
+    return short_index, long_index
+
+
+def _expected_broker_leg_keys(
+    managed_position: dict[str, Any],
+) -> tuple[
+    tuple[str, str, str, int, float],
+    tuple[str, str, str, int, float],
+]:
+    right = _option_right_for_strategy(str(managed_position["strategy"]))
+    quantity = int(managed_position["quantity"])
+    ticker = str(managed_position["ticker"])
+    expiry = str(managed_position["expiry"])
+    return (
+        (
+            ticker,
+            expiry,
+            right,
+            -quantity,
+            float(managed_position["short_strike"]),
+        ),
+        (
+            ticker,
+            expiry,
+            right,
+            quantity,
+            float(managed_position["long_strike"]),
+        ),
+    )
+
+
+def _stored_broker_leg_keys(
+    managed_position: dict[str, Any],
+) -> tuple[
+    tuple[str, str, str, int, float],
+    tuple[str, str, str, int, float],
+] | None:
+    parts = str(managed_position["broker_fingerprint"]).split("|")
+    if len(parts) != 6:
+        return None
+    ticker, expiry, right, short_strike, long_strike, quantity = parts
+    try:
+        parsed_quantity = int(quantity)
+        parsed_short_strike = float(short_strike)
+        parsed_long_strike = float(long_strike)
+    except ValueError:
+        return None
+    return (
+        (
+            ticker,
+            expiry,
+            right,
+            -parsed_quantity,
+            parsed_short_strike,
+        ),
+        (
+            ticker,
+            expiry,
+            right,
+            parsed_quantity,
+            parsed_long_strike,
+        ),
+    )
+
+
+def _find_leg_index(
+    available_legs: list[tuple[str, str, str, int, float]],
+    expected_leg: tuple[str, str, str, int, float],
+    *,
+    skip_index: int | None = None,
+) -> int | None:
+    for index, leg in enumerate(available_legs):
+        if skip_index is not None and index == skip_index:
+            continue
+        if leg == expected_leg:
+            return index
+    return None
+
+
+def _remove_matched_legs(
+    available_legs: list[tuple[str, str, str, int, float]],
+    indexes: tuple[int, int],
+) -> None:
+    for index in sorted(indexes, reverse=True):
+        available_legs.pop(index)
+
+
+def _leftover_broker_fingerprints(
+    available_legs: list[tuple[str, str, str, int, float]],
+) -> set[str] | None:
+    grouped_legs: dict[
         tuple[str, str, str, int],
-        dict[str, list[BrokerOptionPosition]],
+        dict[str, list[float]],
     ] = defaultdict(lambda: {"short": [], "long": []})
-    for broker_position in broker_positions:
-        if broker_position.short_strike is None:
-            return None
-        quantity = int(broker_position.quantity)
+    for ticker, expiry, right, quantity, strike in available_legs:
         if quantity == 0:
             return None
-        key = (
-            broker_position.ticker,
-            broker_position.expiry,
-            broker_position.right,
-            abs(quantity),
-        )
+        key = (ticker, expiry, right, abs(quantity))
         bucket = "short" if quantity < 0 else "long"
-        grouped_positions[key][bucket].append(broker_position)
+        grouped_legs[key][bucket].append(strike)
 
-    identities: set[tuple[str, str]] = set()
-    for (ticker, expiry, right, quantity), grouped in grouped_positions.items():
-        short_legs = grouped["short"]
-        long_legs = grouped["long"]
-        if len(short_legs) != 1 or len(long_legs) != 1:
+    fingerprints: set[str] = set()
+    for (ticker, expiry, right, quantity), grouped in grouped_legs.items():
+        short_strikes = grouped["short"]
+        long_strikes = grouped["long"]
+        if len(short_strikes) != len(long_strikes):
             return None
-        short_leg = short_legs[0]
-        long_leg = long_legs[0]
-        strategy = _infer_credit_spread_strategy(
+        ordered_pairs = _pair_leftover_strikes(
             right=right,
-            short_strike=float(short_leg.short_strike),
-            long_strike=float(long_leg.short_strike),
+            short_strikes=short_strikes,
+            long_strikes=long_strikes,
         )
-        if strategy is None:
+        if ordered_pairs is None:
             return None
-        identities.add(
-            (
+        for short_strike, long_strike in ordered_pairs:
+            fingerprints.add(
                 (
-                    f"{ticker}|{expiry}|{right}|{float(short_leg.short_strike)}|"
-                    f"{float(long_leg.short_strike)}|{quantity}"
-                ),
-                strategy,
+                    f"{ticker}|{expiry}|{right}|{float(short_strike)}|"
+                    f"{float(long_strike)}|{quantity}"
+                )
             )
-        )
-    return identities
+    return fingerprints
+
+
+def _pair_leftover_strikes(
+    *,
+    right: str,
+    short_strikes: list[float],
+    long_strikes: list[float],
+) -> list[tuple[float, float]] | None:
+    if right == "P":
+        ordered_shorts = sorted(short_strikes, reverse=True)
+        ordered_longs = sorted(long_strikes, reverse=True)
+        if any(short <= long for short, long in zip(ordered_shorts, ordered_longs)):
+            return None
+        return list(zip(ordered_shorts, ordered_longs, strict=True))
+    if right == "C":
+        ordered_shorts = sorted(short_strikes)
+        ordered_longs = sorted(long_strikes)
+        if any(short >= long for short, long in zip(ordered_shorts, ordered_longs)):
+            return None
+        return list(zip(ordered_shorts, ordered_longs, strict=True))
+    return None
 
 
 def _option_right_for_strategy(strategy: str) -> str:
