@@ -15,12 +15,11 @@ class RiskGuard:
         account: AccountSnapshot,
         open_symbol_count: int,
     ) -> GuardResult:
+        daily_pnl = account.realized_pnl + account.unrealized_pnl
+
         if spread.max_loss > account.net_liq * self._risk_settings.max_risk_per_trade_pct:
             return GuardResult(allowed=False, reason="max_risk_per_trade_pct")
-        if (
-            abs(account.realized_pnl + account.unrealized_pnl)
-            > account.net_liq * self._risk_settings.max_daily_loss_pct
-        ):
+        if daily_pnl < 0 and (-daily_pnl) > account.net_liq * self._risk_settings.max_daily_loss_pct:
             return GuardResult(allowed=False, reason="max_daily_loss_pct")
         if account.new_positions_today >= self._risk_settings.max_new_positions_per_day:
             return GuardResult(allowed=False, reason="max_new_positions_per_day")
