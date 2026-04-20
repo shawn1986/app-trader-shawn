@@ -191,15 +191,7 @@ class AuditLogger:
     def update_managed_position(self, position_id: str, **updates: Any) -> None:
         if not updates:
             return
-        invalid_columns = sorted(
-            set(updates) - (set(self._MANAGED_POSITION_COLUMNS) - {"position_id"})
-        )
-        if invalid_columns:
-            names = ", ".join(invalid_columns)
-            raise ValueError(f"unsupported managed position fields: {names}")
-        normalized_updates = {
-            key: _json_safe_payload(value, path=key) for key, value in updates.items()
-        }
+        normalized_updates = self._normalize_managed_position_updates(updates)
         assignments = ", ".join(f"{column} = ?" for column in normalized_updates)
         values = tuple(normalized_updates.values()) + (position_id,)
         with self._connect() as connection:
@@ -212,6 +204,44 @@ class AuditLogger:
                 values,
             )
             connection.commit()
+
+    def update_managed_position_if_status(
+        self,
+        position_id: str,
+        *,
+        expected_status: str,
+        **updates: Any,
+    ) -> bool:
+        if not updates:
+            return False
+        normalized_updates = self._normalize_managed_position_updates(updates)
+        assignments = ", ".join(f"{column} = ?" for column in normalized_updates)
+        values = tuple(normalized_updates.values()) + (position_id, expected_status)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                update managed_positions
+                set {assignments}
+                where position_id = ? and status = ?
+                """,
+                values,
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
+    def _normalize_managed_position_updates(
+        self,
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
+        invalid_columns = sorted(
+            set(updates) - (set(self._MANAGED_POSITION_COLUMNS) - {"position_id"})
+        )
+        if invalid_columns:
+            names = ", ".join(invalid_columns)
+            raise ValueError(f"unsupported managed position fields: {names}")
+        return {
+            key: _json_safe_payload(value, path=key) for key, value in updates.items()
+        }
 
     def fetch_active_managed_positions(self, *, mode: str) -> list[dict[str, Any]]:
         with self._connect() as connection:

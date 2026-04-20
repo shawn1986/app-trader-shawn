@@ -255,6 +255,53 @@ def test_audit_logger_uses_payload_json_column_for_position_events(
     assert logger.fetch_position_events("pos-1")[0]["payload"] == {"entry_order_id": 321}
 
 
+def test_update_managed_position_if_status_only_updates_when_expected_status_matches(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "",
+        }
+    )
+
+    claimed = logger.update_managed_position_if_status(
+        "pos-1",
+        expected_status="open",
+        status="closing",
+        last_known_debit=0.42,
+    )
+    rejected = logger.update_managed_position_if_status(
+        "pos-1",
+        expected_status="open",
+        status="open",
+        last_known_debit=0.99,
+    )
+
+    position = logger.fetch_active_managed_positions(mode="paper")[0]
+    assert claimed is True
+    assert rejected is False
+    assert position["status"] == "closing"
+    assert position["last_known_debit"] == 0.42
+
+
 def test_evaluate_exit_returns_take_profit_when_debit_reaches_half_credit() -> None:
     position = PositionSnapshot(
         ticker="AMD",
@@ -1702,6 +1749,101 @@ def test_manage_positions_fails_closed_on_duplicate_identical_saved_strict_ident
     assert positions[1]["status"] == "open"
 
 
+def test_manage_positions_returns_position_to_open_when_submit_fails(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "",
+        }
+    )
+    market_data = FakeManageMarketData(
+        option_positions=[
+            BrokerOptionPosition(
+                ticker="AMD",
+                expiry="2026-04-30",
+                right="P",
+                quantity=-1,
+                short_strike=160.0,
+                broker_position_id="80160",
+            ),
+            BrokerOptionPosition(
+                ticker="AMD",
+                expiry="2026-04-30",
+                right="P",
+                quantity=1,
+                short_strike=155.0,
+                broker_position_id="80155",
+            ),
+        ],
+        spread_debit=0.42,
+        spot_price=171.0,
+    )
+    failing_executor = FailingSubmitManageExecutor()
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=market_data,
+        executor=failing_executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    with pytest.raises(RuntimeError, match="submit temporarily unavailable"):
+        manager.manage_positions()
+
+    persisted = logger.fetch_active_managed_positions(mode="paper")[0]
+    assert persisted["status"] == "open"
+    assert persisted["last_known_debit"] == 0.42
+    assert persisted["last_evaluated_at"] is not None
+    assert failing_executor.calls == [("AMD", 0.42)]
+    assert logger.fetch_position_events("pos-1") == []
+
+    retry_executor = FakeManageExecutor()
+    retry_manager = PositionManager(
+        audit_logger=logger,
+        market_data=market_data,
+        executor=retry_executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = retry_manager.manage_positions()
+
+    assert result["status"] == "submitted"
+    assert retry_executor.calls == [("AMD", 0.42)]
+    assert logger.fetch_active_managed_positions(mode="paper")[0]["status"] == "closing"
+
+
 class _FakeOption:
     def __init__(
         self,
@@ -1892,6 +2034,18 @@ class FakeManageExecutor:
         }
 
 
+class FailingSubmitManageExecutor(FakeManageExecutor):
+    def submit_limit_combo(
+        self,
+        position: PositionSnapshot,
+        *,
+        limit_price: float,
+    ) -> dict[str, object]:
+        self.calls.append((position.ticker, limit_price))
+        self.positions.append(position)
+        raise RuntimeError("submit temporarily unavailable")
+
+
 class FailingClosingUpdateAuditLogger:
     def __init__(self, base_logger: AuditLogger) -> None:
         self._base_logger = base_logger
@@ -1901,6 +2055,21 @@ class FailingClosingUpdateAuditLogger:
 
     def upsert_managed_position(self, payload: dict[str, object]) -> None:
         self._base_logger.upsert_managed_position(payload)
+
+    def update_managed_position_if_status(
+        self,
+        position_id: str,
+        *,
+        expected_status: str,
+        **updates: object,
+    ) -> bool:
+        if expected_status == "open" and updates.get("status") == "closing":
+            raise RuntimeError("closing update failed")
+        return self._base_logger.update_managed_position_if_status(
+            position_id,
+            expected_status=expected_status,
+            **updates,
+        )
 
     def update_managed_position(self, position_id: str, **updates: object) -> None:
         if updates.get("status") == "closing":

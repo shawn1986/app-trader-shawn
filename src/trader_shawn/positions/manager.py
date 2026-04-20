@@ -74,14 +74,14 @@ class PositionManager:
         )
 
         for staged in staged_evaluations:
+            if staged is submission_target:
+                continue
             managed_position = staged["managed_position"]
             snapshot = staged["snapshot"]
             updates: dict[str, Any] = {
                 "last_known_debit": float(snapshot.current_debit),
                 "last_evaluated_at": staged["recorded_at"].isoformat(),
             }
-            if staged is submission_target:
-                updates["status"] = "closing"
             self._audit_logger.update_managed_position(
                 managed_position["position_id"],
                 **updates,
@@ -105,19 +105,37 @@ class PositionManager:
                 created_at=recorded_at,
             )
 
-        submission: dict[str, object] | None = None
         if submission_target is not None:
-            snapshot = submission_target["snapshot"]
-            submission = self._executor.submit_limit_combo(
-                snapshot,
-                limit_price=float(snapshot.current_debit),
-            )
-
-        if submission_target is not None and submission is not None:
             managed_position = submission_target["managed_position"]
             snapshot = submission_target["snapshot"]
-            exit_reason = submission_target["exit_reason"]
             recorded_at = submission_target["recorded_at"]
+            claimed = self._audit_logger.update_managed_position_if_status(
+                managed_position["position_id"],
+                expected_status="open",
+                status="closing",
+                last_known_debit=float(snapshot.current_debit),
+                last_evaluated_at=recorded_at.isoformat(),
+            )
+            if not claimed:
+                return {
+                    "status": "ok",
+                    "managed_count": len(managed_positions),
+                }
+
+            try:
+                submission = self._executor.submit_limit_combo(
+                    snapshot,
+                    limit_price=float(snapshot.current_debit),
+                )
+            except Exception:
+                self._audit_logger.update_managed_position_if_status(
+                    managed_position["position_id"],
+                    expected_status="closing",
+                    status="open",
+                )
+                raise
+
+            exit_reason = submission_target["exit_reason"]
             self._audit_logger.record_position_event(
                 managed_position["position_id"],
                 "close_submitted",
