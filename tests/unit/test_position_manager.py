@@ -1,15 +1,20 @@
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
-from trader_shawn.domain.models import ManagedPositionRecord, PositionSnapshot
+from trader_shawn.domain.models import (
+    BrokerOptionPosition,
+    ManagedPositionRecord,
+    PositionSnapshot,
+)
 from trader_shawn.events.earnings_calendar import EarningsCalendar
 from trader_shawn.monitoring import audit_logger as audit_logger_module
 from trader_shawn.monitoring.audit_logger import AuditLogger
 from trader_shawn.execution.ibkr_executor import IbkrExecutor
 from trader_shawn.execution.order_builder import build_credit_spread_combo_order
-from trader_shawn.positions.manager import evaluate_exit
+from trader_shawn.positions.manager import PositionManager, evaluate_exit
 from datetime import UTC, date, datetime
 
 
@@ -647,6 +652,117 @@ def test_ibkr_executor_submit_limit_combo_returns_stubbed_submission_record() ->
     }
 
 
+def test_manage_positions_fails_closed_on_unknown_broker_option_position(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+            ]
+        ),
+        executor=FakeManageExecutor(),
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+    )
+
+    result = manager.manage_positions()
+
+    assert result["status"] == "anomaly"
+    assert result["reason"] == "unknown_broker_position"
+
+
+def test_manage_positions_submits_close_for_take_profit(tmp_path: Path) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "",
+        }
+    )
+    executor = FakeManageExecutor()
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+            ],
+            spread_debit=0.42,
+            spot_price=171.0,
+        ),
+        executor=executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    assert result["status"] == "submitted"
+    assert result["exit_reason"] == "take_profit"
+    assert executor.calls == [("AMD", 0.42)]
+    assert logger.fetch_active_managed_positions(mode="paper")[0]["status"] == "closing"
+    assert logger.fetch_position_events("pos-1")[-1]["event_type"] == "close_submitted"
+
+
 class _FakeOption:
     def __init__(
         self,
@@ -732,3 +848,63 @@ class _FakeIbClient:
                 "orderStatus": type("OrderStatus", (), {"status": "PendingSubmit"})(),
             },
         )()
+
+
+class FakeManageMarketData:
+    def __init__(
+        self,
+        *,
+        option_positions: list[BrokerOptionPosition],
+        spread_debit: float = 0.85,
+        spot_price: float = 150.0,
+    ) -> None:
+        self._option_positions = option_positions
+        self._spread_debit = spread_debit
+        self._spot_price = spot_price
+
+    def fetch_option_positions(self) -> list[BrokerOptionPosition]:
+        return list(self._option_positions)
+
+    def estimate_spread_debit(
+        self,
+        *,
+        ticker: str,
+        expiry: str,
+        short_strike: float,
+        long_strike: float,
+        strategy: str,
+        exchange: str = "SMART",
+        currency: str = "USD",
+    ) -> float:
+        return self._spread_debit
+
+    def fetch_spot_price(
+        self,
+        ticker: str,
+        *,
+        exchange: str = "SMART",
+        currency: str = "USD",
+    ) -> float:
+        return self._spot_price
+
+
+class FakeManageExecutor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, float]] = []
+
+    def submit_limit_combo(
+        self,
+        position: PositionSnapshot,
+        *,
+        limit_price: float,
+    ) -> dict[str, object]:
+        self.calls.append((position.ticker, limit_price))
+        return {
+            "status": "submitted",
+            "order_id": 999,
+            "broker_fingerprint": (
+                f"{position.ticker}|{position.expiry}|P|"
+                f"{float(position.short_strike)}|{float(position.long_strike)}|"
+                f"{int(position.quantity)}"
+            ),
+        }
