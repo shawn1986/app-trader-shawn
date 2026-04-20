@@ -1526,6 +1526,182 @@ def test_manage_positions_finalizes_missing_closing_position_as_closed(
     assert closed_at is not None
 
 
+def test_manage_positions_does_not_submit_close_before_local_closing_state_persists(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "audit.db"
+    base_logger = AuditLogger(db_path)
+    base_logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "",
+        }
+    )
+    market_data = FakeManageMarketData(
+        option_positions=[
+            BrokerOptionPosition(
+                ticker="AMD",
+                expiry="2026-04-30",
+                right="P",
+                quantity=-1,
+                short_strike=160.0,
+                broker_position_id="80160",
+            ),
+            BrokerOptionPosition(
+                ticker="AMD",
+                expiry="2026-04-30",
+                right="P",
+                quantity=1,
+                short_strike=155.0,
+                broker_position_id="80155",
+            ),
+        ],
+        spread_debit=0.42,
+        spot_price=171.0,
+    )
+    executor = FakeManageExecutor()
+    failing_logger = FailingClosingUpdateAuditLogger(base_logger)
+    manager = PositionManager(
+        audit_logger=failing_logger,
+        market_data=market_data,
+        executor=executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    with pytest.raises(RuntimeError, match="closing update failed"):
+        manager.manage_positions()
+
+    persisted = base_logger.fetch_active_managed_positions(mode="paper")[0]
+    assert persisted["status"] == "open"
+    assert persisted["last_known_debit"] is None
+    assert persisted["last_evaluated_at"] is None
+    assert executor.calls == []
+
+    second_executor = FakeManageExecutor()
+    second_manager = PositionManager(
+        audit_logger=base_logger,
+        market_data=market_data,
+        executor=second_executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = second_manager.manage_positions()
+
+    assert result["status"] == "submitted"
+    assert second_executor.calls == [("AMD", 0.42)]
+
+
+def test_manage_positions_fails_closed_on_duplicate_identical_saved_strict_identities(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    for position_id in ("pos-1", "pos-2"):
+        logger.upsert_managed_position(
+            {
+                "position_id": position_id,
+                "ticker": "AMD",
+                "strategy": "bull_put_credit_spread",
+                "expiry": "2026-04-30",
+                "short_strike": 160.0,
+                "long_strike": 155.0,
+                "quantity": 1,
+                "entry_credit": 1.05,
+                "entry_order_id": 321,
+                "mode": "paper",
+                "status": "open",
+                "opened_at": (
+                    "2026-04-20T09:31:00+00:00"
+                    if position_id == "pos-1"
+                    else "2026-04-20T09:32:00+00:00"
+                ),
+                "closed_at": None,
+                "last_known_debit": None,
+                "last_evaluated_at": None,
+                "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+                "decision_reason": "opened by system",
+                "risk_note": "",
+            }
+        )
+
+    executor = FakeManageExecutor()
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+            ],
+            spread_debit=0.42,
+            spot_price=171.0,
+        ),
+        executor=executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    assert result == {
+        "status": "anomaly",
+        "reason": "unknown_broker_position",
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+    }
+    assert executor.calls == []
+    positions = logger.fetch_active_managed_positions(mode="paper")
+    assert positions[0]["status"] == "open"
+    assert positions[1]["status"] == "open"
+
+
 class _FakeOption:
     def __init__(
         self,
@@ -1714,3 +1890,34 @@ class FakeManageExecutor:
                 f"{int(position.quantity)}"
             ),
         }
+
+
+class FailingClosingUpdateAuditLogger:
+    def __init__(self, base_logger: AuditLogger) -> None:
+        self._base_logger = base_logger
+
+    def fetch_active_managed_positions(self, *, mode: str) -> list[dict[str, object]]:
+        return self._base_logger.fetch_active_managed_positions(mode=mode)
+
+    def upsert_managed_position(self, payload: dict[str, object]) -> None:
+        self._base_logger.upsert_managed_position(payload)
+
+    def update_managed_position(self, position_id: str, **updates: object) -> None:
+        if updates.get("status") == "closing":
+            raise RuntimeError("closing update failed")
+        self._base_logger.update_managed_position(position_id, **updates)
+
+    def record_position_event(
+        self,
+        position_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        *,
+        created_at: datetime | None = None,
+    ) -> None:
+        self._base_logger.record_position_event(
+            position_id,
+            event_type,
+            payload,
+            created_at=created_at,
+        )

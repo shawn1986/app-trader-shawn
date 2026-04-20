@@ -72,13 +72,6 @@ class PositionManager:
             ),
             None,
         )
-        submission: dict[str, object] | None = None
-        if submission_target is not None:
-            snapshot = submission_target["snapshot"]
-            submission = self._executor.submit_limit_combo(
-                snapshot,
-                limit_price=float(snapshot.current_debit),
-            )
 
         for staged in staged_evaluations:
             managed_position = staged["managed_position"]
@@ -110,6 +103,14 @@ class PositionManager:
                     "broker_fingerprint": managed_position["broker_fingerprint"],
                 },
                 created_at=recorded_at,
+            )
+
+        submission: dict[str, object] | None = None
+        if submission_target is not None:
+            snapshot = submission_target["snapshot"]
+            submission = self._executor.submit_limit_combo(
+                snapshot,
+                limit_price=float(snapshot.current_debit),
             )
 
         if submission_target is not None and submission is not None:
@@ -247,6 +248,13 @@ def _reconcile_positions(
     managed_positions: list[dict[str, Any]],
     broker_positions: list[BrokerOptionPosition],
 ) -> dict[str, object]:
+    duplicate_fingerprints = _duplicate_saved_fingerprints(managed_positions)
+    if duplicate_fingerprints:
+        return _anomaly_result(
+            reason="unknown_broker_position",
+            fingerprints=duplicate_fingerprints,
+        )
+
     available_legs = [_broker_leg_key(position) for position in broker_positions]
     matched_positions: list[dict[str, Any]] = []
     closing_to_close: list[dict[str, Any]] = []
@@ -335,6 +343,21 @@ def _stored_identity(
 
 def _identity_fingerprints(identities: set[tuple[str, str]]) -> list[str]:
     return sorted({fingerprint for fingerprint, _ in identities})
+
+
+def _duplicate_saved_fingerprints(
+    managed_positions: list[dict[str, Any]],
+) -> list[str]:
+    identity_counts: dict[tuple[str, str], int] = defaultdict(int)
+    for managed_position in managed_positions:
+        identity_counts[_managed_identity(managed_position)] += 1
+    return _identity_fingerprints(
+        {
+            identity
+            for identity, count in identity_counts.items()
+            if count > 1
+        }
+    )
 
 
 def _managed_fingerprint(managed_position: dict[str, Any]) -> str:
