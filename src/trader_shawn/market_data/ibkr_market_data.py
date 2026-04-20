@@ -24,14 +24,20 @@ class IbkrMarketDataClient:
                     delta=_optional_float(row.get("delta")),
                     last=_optional_float(row.get("last")),
                     mark=_optional_float(row.get("mark")),
-                    volume=int(row.get("volume", 0)),
-                    open_interest=int(row.get("open_interest", 0)),
+                    volume=_optional_int(row.get("volume")),
+                    open_interest=_optional_int(row.get("open_interest")),
                 )
             )
         return quotes
 
 
 def _optional_float(value: object) -> float | None:
-    if value is None:
+    if value is None or value == "":
         return None
     return float(value)
+
+
+def _optional_int(value: object) -> int:
+    if value is None or value == "":
+        return 0
+    return int(value)

@@ -15,7 +15,7 @@ def build_candidates(
     dte: int,
     quotes: list[OptionQuote],
 ) -> list[CandidateSpread]:
-    eligible_quotes = sorted(
+    short_leg_candidates = sorted(
         (
             quote
             for quote in quotes
@@ -28,10 +28,14 @@ def build_candidates(
         ),
         key=lambda quote: (-quote.strike, quote.expiry),
     )
+    long_leg_candidates = sorted(
+        (quote for quote in quotes if quote.ticker == ticker and quote.right == "P"),
+        key=lambda quote: (-quote.strike, quote.expiry),
+    )
 
     candidates: list[CandidateSpread] = []
-    for short_leg in eligible_quotes:
-        for long_leg in eligible_quotes:
+    for short_leg in short_leg_candidates:
+        for long_leg in long_leg_candidates:
             width = short_leg.strike - long_leg.strike
             if short_leg.expiry != long_leg.expiry or width <= 0 or width > MAX_WIDTH:
                 continue
@@ -45,7 +49,7 @@ def build_candidates(
             bid_ask_ratio = ((short_leg.ask - short_leg.bid) + (long_leg.ask - long_leg.bid)) / width
             if bid_ask_ratio > MAX_BID_ASK_RATIO:
                 continue
-            short_delta = short_leg.delta
+            short_delta = abs(short_leg.delta)
 
             candidates.append(
                 CandidateSpread(
