@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import UTC, date, datetime
 from typing import Any
 
+from trader_shawn.domain.enums import PositionSide
 from trader_shawn.domain.models import BrokerOptionPosition, PositionSnapshot
 from trader_shawn.events.earnings_calendar import EarningsCalendar
 
@@ -90,8 +91,7 @@ class PositionManager:
                 "position_id": managed_position["position_id"],
                 "ticker": snapshot.ticker,
                 "exit_reason": exit_reason,
-                "limit_price": float(snapshot.current_debit),
-                "order_id": submission.get("order_id"),
+                "payload": submission,
             }
 
         return {
@@ -114,6 +114,7 @@ class PositionManager:
         return PositionSnapshot(
             ticker=str(managed_position["ticker"]),
             quantity=int(managed_position["quantity"]),
+            side=PositionSide.SHORT,
             strategy=str(managed_position["strategy"]),
             expiry=str(managed_position["expiry"]),
             short_strike=float(managed_position["short_strike"]),
@@ -202,27 +203,31 @@ def _reconcile_positions(
     broker_positions: list[BrokerOptionPosition],
 ) -> dict[str, object]:
     if not managed_positions and broker_positions:
-        fingerprints = _broker_fingerprints(broker_positions)
+        broker_identities = _broker_identities(broker_positions)
         return _anomaly_result(
             reason="unknown_broker_position",
-            fingerprints=[] if fingerprints is None else sorted(fingerprints),
+            fingerprints=(
+                []
+                if broker_identities is None
+                else _identity_fingerprints(broker_identities)
+            ),
         )
 
-    broker_fingerprints = _broker_fingerprints(broker_positions)
-    if broker_fingerprints is None:
+    broker_identities = _broker_identities(broker_positions)
+    if broker_identities is None:
         return _anomaly_result(
             reason="unknown_broker_position",
             fingerprints=[],
         )
 
-    remaining_fingerprints = set(broker_fingerprints)
+    remaining_identities = set(broker_identities)
     missing_fingerprints: list[str] = []
     for managed_position in managed_positions:
-        fingerprint = str(managed_position["broker_fingerprint"])
-        if fingerprint not in remaining_fingerprints:
-            missing_fingerprints.append(fingerprint)
+        identity = _managed_identity(managed_position)
+        if identity not in remaining_identities:
+            missing_fingerprints.append(identity[0])
             continue
-        remaining_fingerprints.remove(fingerprint)
+        remaining_identities.remove(identity)
 
     if missing_fingerprints:
         return _anomaly_result(
@@ -230,10 +235,10 @@ def _reconcile_positions(
             fingerprints=sorted(missing_fingerprints),
         )
 
-    if remaining_fingerprints:
+    if remaining_identities:
         return _anomaly_result(
             reason="unknown_broker_position",
-            fingerprints=sorted(remaining_fingerprints),
+            fingerprints=_identity_fingerprints(remaining_identities),
         )
 
     return {"status": "ok"}
@@ -247,9 +252,22 @@ def _anomaly_result(*, reason: str, fingerprints: list[str]) -> dict[str, object
     }
 
 
-def _broker_fingerprints(
+def _managed_identity(
+    managed_position: dict[str, Any],
+) -> tuple[str, str]:
+    return (
+        str(managed_position["broker_fingerprint"]),
+        str(managed_position["strategy"]),
+    )
+
+
+def _identity_fingerprints(identities: set[tuple[str, str]]) -> list[str]:
+    return sorted({fingerprint for fingerprint, _ in identities})
+
+
+def _broker_identities(
     broker_positions: list[BrokerOptionPosition],
-) -> set[str] | None:
+) -> set[tuple[str, str]] | None:
     grouped_positions: dict[
         tuple[str, str, str, int],
         dict[str, list[BrokerOptionPosition]],
@@ -269,7 +287,7 @@ def _broker_fingerprints(
         bucket = "short" if quantity < 0 else "long"
         grouped_positions[key][bucket].append(broker_position)
 
-    fingerprints: set[str] = set()
+    identities: set[tuple[str, str]] = set()
     for (ticker, expiry, right, quantity), grouped in grouped_positions.items():
         short_legs = grouped["short"]
         long_legs = grouped["long"]
@@ -277,32 +295,40 @@ def _broker_fingerprints(
             return None
         short_leg = short_legs[0]
         long_leg = long_legs[0]
-        if not _is_valid_credit_spread_shape(
+        strategy = _infer_credit_spread_strategy(
             right=right,
             short_strike=float(short_leg.short_strike),
             long_strike=float(long_leg.short_strike),
-        ):
+        )
+        if strategy is None:
             return None
-        fingerprints.add(
+        identities.add(
             (
-                f"{ticker}|{expiry}|{right}|{float(short_leg.short_strike)}|"
-                f"{float(long_leg.short_strike)}|{quantity}"
+                (
+                    f"{ticker}|{expiry}|{right}|{float(short_leg.short_strike)}|"
+                    f"{float(long_leg.short_strike)}|{quantity}"
+                ),
+                strategy,
             )
         )
-    return fingerprints
+    return identities
 
 
-def _is_valid_credit_spread_shape(
+def _infer_credit_spread_strategy(
     *,
     right: str,
     short_strike: float,
     long_strike: float,
-) -> bool:
+) -> str | None:
     if right == "P":
-        return short_strike > long_strike
+        if short_strike > long_strike:
+            return "bull_put_credit_spread"
+        return None
     if right == "C":
-        return short_strike < long_strike
-    return False
+        if short_strike < long_strike:
+            return "bear_call_credit_spread"
+        return None
+    return None
 
 
 def _days_to_expiry(*, expiry: str, as_of: date) -> int:
