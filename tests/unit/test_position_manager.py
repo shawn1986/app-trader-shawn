@@ -1965,6 +1965,121 @@ def test_manage_positions_leaves_position_closing_when_submit_fails_ambiguously(
     assert logger.fetch_active_managed_positions(mode="paper")[0]["status"] == "closing"
 
 
+def test_manage_positions_finalizes_missing_closing_positions_before_returning_uncertain_submit_anomaly(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "audit.db"
+    logger = AuditLogger(db_path)
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-uncertain",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "closing",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": 0.42,
+            "last_evaluated_at": "2026-04-20T10:00:00+00:00",
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "close in progress",
+            "risk_note": "",
+        }
+    )
+    logger.record_position_event(
+        "pos-uncertain",
+        "close_submit_uncertain",
+        {
+            "exit_reason": "take_profit",
+            "limit_price": 0.42,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "error": "submit temporarily unavailable",
+        },
+    )
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-missing",
+            "ticker": "NVDA",
+            "strategy": "bear_call_credit_spread",
+            "expiry": "2026-05-15",
+            "short_strike": 125.0,
+            "long_strike": 130.0,
+            "quantity": 1,
+            "entry_credit": 1.10,
+            "entry_order_id": 322,
+            "mode": "paper",
+            "status": "closing",
+            "opened_at": "2026-04-20T09:32:00+00:00",
+            "closed_at": None,
+            "last_known_debit": 0.55,
+            "last_evaluated_at": "2026-04-20T10:05:00+00:00",
+            "broker_fingerprint": "NVDA|2026-05-15|C|125.0|130.0|1",
+            "decision_reason": "close in progress",
+            "risk_note": "",
+        }
+    )
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+            ],
+            spread_debit=0.42,
+            spot_price=171.0,
+        ),
+        executor=FakeManageExecutor(),
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    assert result == {
+        "status": "anomaly",
+        "reason": "uncertain_submit_state",
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "manual_intervention_required": True,
+    }
+    active_positions = logger.fetch_active_managed_positions(mode="paper")
+    assert [position["position_id"] for position in active_positions] == ["pos-uncertain"]
+    assert active_positions[0]["status"] == "closing"
+    assert logger.fetch_position_events("pos-missing")[-1]["event_type"] == "closed"
+    with sqlite3.connect(db_path) as connection:
+        status, closed_at = connection.execute(
+            "select status, closed_at from managed_positions where position_id = ?",
+            ("pos-missing",),
+        ).fetchone()
+    assert status == "closed"
+    assert closed_at is not None
+
+
 class _FakeOption:
     def __init__(
         self,

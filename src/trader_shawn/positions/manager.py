@@ -44,6 +44,24 @@ class PositionManager:
 
         matched_positions = list(reconciliation["matched_positions"])
         closing_to_close = list(reconciliation["closing_to_close"])
+        for managed_position in closing_to_close:
+            recorded_at = datetime.now(UTC)
+            self._audit_logger.update_managed_position(
+                managed_position["position_id"],
+                status="closed",
+                closed_at=recorded_at.isoformat(),
+                last_evaluated_at=recorded_at.isoformat(),
+            )
+            self._audit_logger.record_position_event(
+                managed_position["position_id"],
+                "closed",
+                {
+                    "reason": "broker_position_missing",
+                    "broker_fingerprint": managed_position["broker_fingerprint"],
+                },
+                created_at=recorded_at,
+            )
+
         uncertain_fingerprints = self._uncertain_submit_fingerprints(matched_positions)
         if uncertain_fingerprints:
             return {
@@ -94,24 +112,6 @@ class PositionManager:
             self._audit_logger.update_managed_position(
                 managed_position["position_id"],
                 **updates,
-            )
-
-        for managed_position in closing_to_close:
-            recorded_at = datetime.now(UTC)
-            self._audit_logger.update_managed_position(
-                managed_position["position_id"],
-                status="closed",
-                closed_at=recorded_at.isoformat(),
-                last_evaluated_at=recorded_at.isoformat(),
-            )
-            self._audit_logger.record_position_event(
-                managed_position["position_id"],
-                "closed",
-                {
-                    "reason": "broker_position_missing",
-                    "broker_fingerprint": managed_position["broker_fingerprint"],
-                },
-                created_at=recorded_at,
             )
 
         if submission_target is not None:
