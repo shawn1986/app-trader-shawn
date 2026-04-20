@@ -113,6 +113,26 @@ def trade_cycle_command() -> None:
     click.echo(json.dumps(_trade_cycle_command(), sort_keys=True))
 
 
+@cli.command("scan")
+def scan_command() -> None:
+    click.echo(json.dumps(_scan_command(), sort_keys=True))
+
+
+@cli.command("decide")
+def decide_command() -> None:
+    click.echo(json.dumps(_decide_command(), sort_keys=True))
+
+
+@cli.command("trade")
+def trade_command() -> None:
+    click.echo(json.dumps(_trade_command(), sort_keys=True))
+
+
+@cli.command("manage")
+def manage_command() -> None:
+    click.echo(json.dumps(_manage_command(), sort_keys=True))
+
+
 @cli.command("dashboard")
 @click.argument("state_path", type=click.Path(path_type=Path))
 def dashboard_command(state_path: Path) -> None:
@@ -178,6 +198,22 @@ def _error_result(*, status: str, reason: str, exc: Exception) -> dict[str, str]
 
 
 def _trade_cycle_command() -> dict[str, str]:
+    return {"status": "not_implemented"}
+
+
+def _scan_command() -> dict[str, str]:
+    return {"status": "not_implemented"}
+
+
+def _decide_command() -> dict[str, str]:
+    return {"status": "not_implemented"}
+
+
+def _trade_command() -> dict[str, str]:
+    return {"status": "not_implemented"}
+
+
+def _manage_command() -> dict[str, str]:
     return {"status": "not_implemented"}
 
 
