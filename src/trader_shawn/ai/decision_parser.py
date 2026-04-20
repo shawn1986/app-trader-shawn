@@ -49,6 +49,12 @@ def _require_number(payload: dict[str, Any], field_name: str) -> float:
     return float(value)
 
 
+def _optional_number(payload: dict[str, Any], field_name: str) -> float | None:
+    if field_name not in payload or payload[field_name] is None:
+        return None
+    return _require_number(payload, field_name)
+
+
 def parse_decision(payload: dict[str, Any]) -> ParsedDecision:
     if not isinstance(payload, dict):
         raise ValueError("decision payload must be a dictionary")
@@ -84,10 +90,10 @@ def parse_decision(payload: dict[str, Any]) -> ParsedDecision:
         ticker=payload.get("ticker"),
         strategy=payload.get("strategy"),
         expiry=payload.get("expiry"),
-        short_strike=float(payload["short_strike"]) if isinstance(payload.get("short_strike"), int | float) else None,
-        long_strike=float(payload["long_strike"]) if isinstance(payload.get("long_strike"), int | float) else None,
-        limit_credit=float(payload["limit_credit"]) if isinstance(payload.get("limit_credit"), int | float) else None,
-        confidence=float(payload["confidence"]) if isinstance(payload.get("confidence"), int | float) else None,
+        short_strike=_optional_number(payload, "short_strike"),
+        long_strike=_optional_number(payload, "long_strike"),
+        limit_credit=_optional_number(payload, "limit_credit"),
+        confidence=_optional_number(payload, "confidence"),
         reason=_require_str(payload, "reason"),
         risk_note=payload.get("risk_note"),
         raw_payload=dict(payload),

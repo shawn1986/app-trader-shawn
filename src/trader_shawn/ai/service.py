@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from subprocess import SubprocessError
 from typing import Any
 
-from trader_shawn.ai.base import AiProvider
+from trader_shawn.ai.base import AiProvider, AiProviderError, provider_error_from_runtime_failure
 from trader_shawn.ai.decision_parser import ParsedDecision, parse_decision
 
 
@@ -21,11 +22,12 @@ class AiDecisionService:
 
         try:
             decision.secondary_payload = self._secondary.request(prompt)
-        except Exception as exc:
-            decision.secondary_payload = {
-                "action": "error",
-                "reason": "secondary provider failed",
-                "error": str(exc),
-            }
+        except AiProviderError as exc:
+            decision.secondary_payload = exc.to_payload()
+        except (OSError, SubprocessError) as exc:
+            decision.secondary_payload = provider_error_from_runtime_failure(
+                "secondary",
+                exc,
+            ).to_payload()
 
         return decision

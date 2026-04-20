@@ -4,7 +4,7 @@ import json
 import subprocess
 from typing import Any
 
-from trader_shawn.ai.base import AiProvider
+from trader_shawn.ai.base import AiProvider, AiProviderError
 
 
 class CodexAdapter(AiProvider):
@@ -21,4 +21,16 @@ class CodexAdapter(AiProvider):
             timeout=self._timeout_seconds,
             check=True,
         )
-        return json.loads(completed.stdout)
+        return _parse_stdout("codex", completed.stdout, completed.stderr)
+
+
+def _parse_stdout(provider: str, stdout: str, stderr: str) -> dict[str, Any]:
+    if not stdout.strip():
+        raise AiProviderError(provider, "empty stdout", stdout=stdout, stderr=stderr)
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise AiProviderError(provider, f"malformed json: {exc.msg}", stdout=stdout, stderr=stderr) from exc
+    if not isinstance(payload, dict):
+        raise AiProviderError(provider, "expected top-level JSON object", stdout=stdout, stderr=stderr)
+    return payload
