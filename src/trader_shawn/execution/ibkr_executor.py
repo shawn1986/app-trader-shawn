@@ -10,6 +10,10 @@ from trader_shawn.execution.order_builder import (
 )
 
 
+class OrderNotSubmittedError(RuntimeError):
+    """Raised when local pre-submit work fails before IBKR receives the order."""
+
+
 class IbkrExecutor:
     def __init__(
         self,
@@ -37,13 +41,17 @@ class IbkrExecutor:
         limit_credit: float,
         quantity: int = 1,
     ) -> dict[str, object]:
-        return self._submit_combo_order(
-            build_open_credit_spread_combo_order(
+        try:
+            payload = build_open_credit_spread_combo_order(
                 spread,
                 limit_credit=limit_credit,
                 quantity=quantity,
             )
-        )
+            return self._submit_combo_order(payload)
+        except OrderNotSubmittedError:
+            raise
+        except Exception as exc:
+            raise OrderNotSubmittedError(str(exc)) from exc
 
     def submit_limit_combo(
         self,
@@ -51,12 +59,16 @@ class IbkrExecutor:
         *,
         limit_price: float,
     ) -> dict[str, object]:
-        submission = self._submit_combo_order(
-            build_credit_spread_combo_order(
+        try:
+            payload = build_credit_spread_combo_order(
                 position,
                 limit_price=limit_price,
             )
-        )
+            submission = self._submit_combo_order(payload)
+        except OrderNotSubmittedError:
+            raise
+        except Exception as exc:
+            raise OrderNotSubmittedError(str(exc)) from exc
         submission["broker_fingerprint"] = self._broker_fingerprint(position)
         return submission
 
@@ -68,64 +80,72 @@ class IbkrExecutor:
         currency = str(payload["currency"])
         leg_payloads = list(payload["legs"])
 
-        qualified_legs = list(
-            client.qualifyContracts(
-                *[
-                    ibkr.Option(
-                        symbol=symbol,
-                        lastTradeDateOrContractMonth=_ibkr_expiry(str(leg["expiry"])),
-                        strike=float(leg["strike"]),
-                        right=str(leg["right"]),
-                        exchange=exchange,
-                        currency=currency,
-                    )
-                    for leg in leg_payloads
-                ]
-            )
-        )
-        if len(qualified_legs) != len(leg_payloads):
-            raise RuntimeError("failed to qualify all combo legs")
-
-        combo_legs: list[Any] = []
-        normalized_legs: list[dict[str, object]] = []
-        for contract, leg in zip(qualified_legs, leg_payloads, strict=True):
-            con_id = int(getattr(contract, "conId", 0))
-            if con_id <= 0:
-                raise RuntimeError("qualified combo leg is missing conId")
-            combo_legs.append(
-                ibkr.ComboLeg(
-                    conId=con_id,
-                    ratio=int(leg["ratio"]),
-                    action=str(leg["action"]),
-                    exchange=exchange,
+        try:
+            qualified_legs = list(
+                client.qualifyContracts(
+                    *[
+                        ibkr.Option(
+                            symbol=symbol,
+                            lastTradeDateOrContractMonth=_ibkr_expiry(
+                                str(leg["expiry"])
+                            ),
+                            strike=float(leg["strike"]),
+                            right=str(leg["right"]),
+                            exchange=exchange,
+                            currency=currency,
+                        )
+                        for leg in leg_payloads
+                    ]
                 )
             )
-            normalized_legs.append(
-                {
-                    "con_id": con_id,
-                    "action": str(leg["action"]),
-                    "ratio": int(leg["ratio"]),
-                    "exchange": exchange,
-                    "right": str(leg["right"]),
-                    "strike": float(leg["strike"]),
-                    "expiry": str(leg["expiry"]),
-                }
-            )
+            if len(qualified_legs) != len(leg_payloads):
+                raise OrderNotSubmittedError("failed to qualify all combo legs")
 
-        bag_contract = ibkr.Contract(
-            symbol=symbol,
-            secType="BAG",
-            currency=currency,
-            exchange=exchange,
-            comboLegs=combo_legs,
-        )
-        order_payload = dict(payload["order"])
-        order = ibkr.LimitOrder(
-            str(order_payload["action"]),
-            int(order_payload["totalQuantity"]),
-            float(order_payload["lmtPrice"]),
-            transmit=True,
-        )
+            combo_legs: list[Any] = []
+            normalized_legs: list[dict[str, object]] = []
+            for contract, leg in zip(qualified_legs, leg_payloads, strict=True):
+                con_id = int(getattr(contract, "conId", 0))
+                if con_id <= 0:
+                    raise OrderNotSubmittedError("qualified combo leg is missing conId")
+                combo_legs.append(
+                    ibkr.ComboLeg(
+                        conId=con_id,
+                        ratio=int(leg["ratio"]),
+                        action=str(leg["action"]),
+                        exchange=exchange,
+                    )
+                )
+                normalized_legs.append(
+                    {
+                        "con_id": con_id,
+                        "action": str(leg["action"]),
+                        "ratio": int(leg["ratio"]),
+                        "exchange": exchange,
+                        "right": str(leg["right"]),
+                        "strike": float(leg["strike"]),
+                        "expiry": str(leg["expiry"]),
+                    }
+                )
+
+            bag_contract = ibkr.Contract(
+                symbol=symbol,
+                secType="BAG",
+                currency=currency,
+                exchange=exchange,
+                comboLegs=combo_legs,
+            )
+            order_payload = dict(payload["order"])
+            order = ibkr.LimitOrder(
+                str(order_payload["action"]),
+                int(order_payload["totalQuantity"]),
+                float(order_payload["lmtPrice"]),
+                transmit=True,
+            )
+        except OrderNotSubmittedError:
+            raise
+        except Exception as exc:
+            raise OrderNotSubmittedError(str(exc)) from exc
+
         trade = client.placeOrder(bag_contract, order)
 
         return {

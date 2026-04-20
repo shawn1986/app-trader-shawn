@@ -6,6 +6,7 @@ from typing import Any
 
 from trader_shawn.domain.enums import PositionSide
 from trader_shawn.domain.models import BrokerOptionPosition, PositionSnapshot
+from trader_shawn.execution.ibkr_executor import OrderNotSubmittedError
 from trader_shawn.events.earnings_calendar import EarningsCalendar
 
 
@@ -43,6 +44,14 @@ class PositionManager:
 
         matched_positions = list(reconciliation["matched_positions"])
         closing_to_close = list(reconciliation["closing_to_close"])
+        uncertain_fingerprints = self._uncertain_submit_fingerprints(matched_positions)
+        if uncertain_fingerprints:
+            return {
+                "status": "anomaly",
+                "reason": "uncertain_submit_state",
+                "fingerprints": uncertain_fingerprints,
+                "manual_intervention_required": True,
+            }
         staged_evaluations: list[dict[str, Any]] = []
         for managed_position in matched_positions:
             snapshot = self._build_snapshot(managed_position)
@@ -127,6 +136,13 @@ class PositionManager:
                     snapshot,
                     limit_price=float(snapshot.current_debit),
                 )
+            except OrderNotSubmittedError:
+                self._audit_logger.update_managed_position_if_status(
+                    managed_position["position_id"],
+                    expected_status="closing",
+                    status="open",
+                )
+                raise
             except Exception as exc:
                 self._audit_logger.record_position_event(
                     managed_position["position_id"],
@@ -168,6 +184,21 @@ class PositionManager:
             "status": "ok",
             "managed_count": len(managed_positions),
         }
+
+    def _uncertain_submit_fingerprints(
+        self,
+        managed_positions: list[dict[str, Any]],
+    ) -> list[str]:
+        fingerprints: set[str] = set()
+        for managed_position in managed_positions:
+            if managed_position["status"] != "closing":
+                continue
+            events = self._audit_logger.fetch_position_events(
+                managed_position["position_id"]
+            )
+            if events and events[-1]["event_type"] == "close_submit_uncertain":
+                fingerprints.add(str(managed_position["broker_fingerprint"]))
+        return sorted(fingerprints)
 
     def _build_snapshot(
         self,

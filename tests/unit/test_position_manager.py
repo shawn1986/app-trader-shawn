@@ -13,7 +13,7 @@ from trader_shawn.domain.enums import PositionSide
 from trader_shawn.events.earnings_calendar import EarningsCalendar
 from trader_shawn.monitoring import audit_logger as audit_logger_module
 from trader_shawn.monitoring.audit_logger import AuditLogger
-from trader_shawn.execution.ibkr_executor import IbkrExecutor
+from trader_shawn.execution.ibkr_executor import IbkrExecutor, OrderNotSubmittedError
 from trader_shawn.execution.order_builder import build_credit_spread_combo_order
 from trader_shawn.positions.manager import PositionManager, evaluate_exit
 from datetime import UTC, date, datetime
@@ -746,6 +746,27 @@ def test_ibkr_executor_submit_limit_combo_returns_stubbed_submission_record() ->
         "broker_status": "PendingSubmit",
         "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
     }
+
+
+def test_ibkr_executor_submit_limit_combo_raises_order_not_submitted_error_when_qualification_fails() -> None:
+    position = PositionSnapshot(
+        ticker="AMD",
+        strategy="bull_put_credit_spread",
+        expiry="2026-04-30",
+        short_strike=160,
+        long_strike=155,
+        entry_credit=1.00,
+        current_debit=0.45,
+        dte=9,
+        short_leg_distance_pct=0.08,
+    )
+    executor = IbkrExecutor(
+        client=_FailingQualificationIbClient(),
+        ibkr_module=_FakeIbModule(),
+    )
+
+    with pytest.raises(OrderNotSubmittedError, match="failed to qualify all combo legs"):
+        executor.submit_limit_combo(position, limit_price=0.45)
 
 
 def test_manage_positions_fails_closed_on_unknown_broker_option_position(
@@ -1749,6 +1770,101 @@ def test_manage_positions_fails_closed_on_duplicate_identical_saved_strict_ident
     assert positions[1]["status"] == "open"
 
 
+def test_manage_positions_returns_position_to_open_when_submit_fails_before_broker_submission(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "",
+        }
+    )
+    market_data = FakeManageMarketData(
+        option_positions=[
+            BrokerOptionPosition(
+                ticker="AMD",
+                expiry="2026-04-30",
+                right="P",
+                quantity=-1,
+                short_strike=160.0,
+                broker_position_id="80160",
+            ),
+            BrokerOptionPosition(
+                ticker="AMD",
+                expiry="2026-04-30",
+                right="P",
+                quantity=1,
+                short_strike=155.0,
+                broker_position_id="80155",
+            ),
+        ],
+        spread_debit=0.42,
+        spot_price=171.0,
+    )
+    failing_executor = DeterministicPreSubmitManageExecutor()
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=market_data,
+        executor=failing_executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    with pytest.raises(OrderNotSubmittedError, match="order payload invalid"):
+        manager.manage_positions()
+
+    persisted = logger.fetch_active_managed_positions(mode="paper")[0]
+    assert persisted["status"] == "open"
+    assert persisted["last_known_debit"] == 0.42
+    assert persisted["last_evaluated_at"] is not None
+    assert failing_executor.calls == [("AMD", 0.42)]
+    assert logger.fetch_position_events("pos-1") == []
+
+    retry_executor = FakeManageExecutor()
+    retry_manager = PositionManager(
+        audit_logger=logger,
+        market_data=market_data,
+        executor=retry_executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = retry_manager.manage_positions()
+
+    assert result["status"] == "submitted"
+    assert retry_executor.calls == [("AMD", 0.42)]
+    assert logger.fetch_active_managed_positions(mode="paper")[0]["status"] == "closing"
+
+
 def test_manage_positions_leaves_position_closing_when_submit_fails_ambiguously(
     tmp_path: Path,
 ) -> None:
@@ -1839,7 +1955,12 @@ def test_manage_positions_leaves_position_closing_when_submit_fails_ambiguously(
 
     result = retry_manager.manage_positions()
 
-    assert result == {"status": "ok", "managed_count": 1}
+    assert result == {
+        "status": "anomaly",
+        "reason": "uncertain_submit_state",
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "manual_intervention_required": True,
+    }
     assert retry_executor.calls == []
     assert logger.fetch_active_managed_positions(mode="paper")[0]["status"] == "closing"
 
@@ -1929,6 +2050,11 @@ class _FakeIbClient:
                 "orderStatus": type("OrderStatus", (), {"status": "PendingSubmit"})(),
             },
         )()
+
+
+class _FailingQualificationIbClient(_FakeIbClient):
+    def qualifyContracts(self, *contracts: _FakeOption) -> list[_FakeOption]:
+        return list(contracts[:-1])
 
 
 class FakeManageMarketData:
@@ -2044,6 +2170,18 @@ class FailingSubmitManageExecutor(FakeManageExecutor):
         self.calls.append((position.ticker, limit_price))
         self.positions.append(position)
         raise RuntimeError("submit temporarily unavailable")
+
+
+class DeterministicPreSubmitManageExecutor(FakeManageExecutor):
+    def submit_limit_combo(
+        self,
+        position: PositionSnapshot,
+        *,
+        limit_price: float,
+    ) -> dict[str, object]:
+        self.calls.append((position.ticker, limit_price))
+        self.positions.append(position)
+        raise OrderNotSubmittedError("order payload invalid")
 
 
 class FailingClosingUpdateAuditLogger:
