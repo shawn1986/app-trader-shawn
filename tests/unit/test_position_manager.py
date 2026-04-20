@@ -1047,6 +1047,153 @@ def test_manage_positions_updates_evaluated_position_when_no_exit_triggers(
     assert logger.fetch_position_events("pos-1") == []
 
 
+def test_manage_positions_refreshes_closing_position_when_no_submit_occurs(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "closing",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "closing in progress",
+            "risk_note": "",
+        }
+    )
+    executor = FakeManageExecutor()
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+            ],
+            spread_debit=0.61,
+            spot_price=171.0,
+        ),
+        executor=executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    position = logger.fetch_active_managed_positions(mode="paper")[0]
+    assert result == {"status": "ok", "managed_count": 1}
+    assert executor.calls == []
+    assert position["status"] == "closing"
+    assert position["last_known_debit"] == 0.61
+    assert position["last_evaluated_at"] is not None
+
+
+def test_manage_positions_fails_closed_when_saved_fields_do_not_match_full_identity(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "NVDA",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "",
+        }
+    )
+    executor = FakeManageExecutor()
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+            ],
+            spread_debit=0.42,
+            spot_price=171.0,
+        ),
+        executor=executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    assert result == {
+        "status": "anomaly",
+        "reason": "missing_broker_position",
+        "fingerprints": ["NVDA|2026-04-30|P|160.0|155.0|1"],
+    }
+    assert executor.calls == []
+    position = logger.fetch_active_managed_positions(mode="paper")[0]
+    assert position["last_known_debit"] is None
+    assert position["last_evaluated_at"] is None
+
+
 def test_manage_positions_fails_closed_when_saved_strategy_does_not_match_broker_identity(
     tmp_path: Path,
 ) -> None:
@@ -1114,13 +1261,117 @@ def test_manage_positions_fails_closed_when_saved_strategy_does_not_match_broker
     assert result == {
         "status": "anomaly",
         "reason": "missing_broker_position",
-        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "fingerprints": ["AMD|2026-04-30|C|160.0|155.0|1"],
     }
     assert executor.calls == []
     position = logger.fetch_active_managed_positions(mode="paper")[0]
     assert position["status"] == "open"
     assert position["last_known_debit"] is None
     assert position["last_evaluated_at"] is None
+
+
+def test_manage_positions_does_not_persist_partial_progress_when_later_reconstruction_fails(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    for position_id, ticker in (("pos-1", "AMD"), ("pos-2", "NVDA")):
+        logger.upsert_managed_position(
+            {
+                "position_id": position_id,
+                "ticker": ticker,
+                "strategy": (
+                    "bull_put_credit_spread"
+                    if ticker == "AMD"
+                    else "bear_call_credit_spread"
+                ),
+                "expiry": "2026-04-30" if ticker == "AMD" else "2026-05-15",
+                "short_strike": 160.0 if ticker == "AMD" else 125.0,
+                "long_strike": 155.0 if ticker == "AMD" else 130.0,
+                "quantity": 1,
+                "entry_credit": 1.05,
+                "entry_order_id": 321,
+                "mode": "paper",
+                "status": "open",
+                "opened_at": (
+                    "2026-04-20T09:31:00+00:00"
+                    if ticker == "AMD"
+                    else "2026-04-20T09:32:00+00:00"
+                ),
+                "closed_at": None,
+                "last_known_debit": None,
+                "last_evaluated_at": None,
+                "broker_fingerprint": (
+                    "AMD|2026-04-30|P|160.0|155.0|1"
+                    if ticker == "AMD"
+                    else "NVDA|2026-05-15|C|125.0|130.0|1"
+                ),
+                "decision_reason": "opened by system",
+                "risk_note": "",
+            }
+        )
+
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FailingManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+                BrokerOptionPosition(
+                    ticker="NVDA",
+                    expiry="2026-05-15",
+                    right="C",
+                    quantity=-1,
+                    short_strike=125.0,
+                    broker_position_id="90125",
+                ),
+                BrokerOptionPosition(
+                    ticker="NVDA",
+                    expiry="2026-05-15",
+                    right="C",
+                    quantity=1,
+                    short_strike=130.0,
+                    broker_position_id="90130",
+                ),
+            ],
+            spread_debit=0.80,
+            spot_price=180.0,
+            raise_on_ticker="NVDA",
+        ),
+        executor=FakeManageExecutor(),
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    with pytest.raises(RuntimeError, match="debit unavailable for NVDA"):
+        manager.manage_positions()
+
+    positions = logger.fetch_active_managed_positions(mode="paper")
+    assert positions[0]["position_id"] == "pos-1"
+    assert positions[0]["last_known_debit"] is None
+    assert positions[0]["last_evaluated_at"] is None
+    assert positions[1]["position_id"] == "pos-2"
+    assert positions[1]["last_known_debit"] is None
+    assert positions[1]["last_evaluated_at"] is None
 
 
 class _FakeOption:
@@ -1246,6 +1497,46 @@ class FakeManageMarketData:
         currency: str = "USD",
     ) -> float:
         return self._spot_price
+
+
+class FailingManageMarketData(FakeManageMarketData):
+    def __init__(
+        self,
+        *,
+        option_positions: list[BrokerOptionPosition],
+        raise_on_ticker: str,
+        spread_debit: float = 0.85,
+        spot_price: float = 150.0,
+    ) -> None:
+        super().__init__(
+            option_positions=option_positions,
+            spread_debit=spread_debit,
+            spot_price=spot_price,
+        )
+        self._raise_on_ticker = raise_on_ticker
+
+    def estimate_spread_debit(
+        self,
+        *,
+        ticker: str,
+        expiry: str,
+        short_strike: float,
+        long_strike: float,
+        strategy: str,
+        exchange: str = "SMART",
+        currency: str = "USD",
+    ) -> float:
+        if ticker == self._raise_on_ticker:
+            raise RuntimeError(f"debit unavailable for {ticker}")
+        return super().estimate_spread_debit(
+            ticker=ticker,
+            expiry=expiry,
+            short_strike=short_strike,
+            long_strike=long_strike,
+            strategy=strategy,
+            exchange=exchange,
+            currency=currency,
+        )
 
 
 class FakeManageExecutor:

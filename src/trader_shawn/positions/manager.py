@@ -41,9 +41,8 @@ class PositionManager:
         if reconciliation["status"] == "anomaly":
             return reconciliation
 
+        staged_evaluations: list[dict[str, Any]] = []
         for managed_position in managed_positions:
-            if managed_position["status"] != "open":
-                continue
             snapshot = self._build_snapshot(managed_position)
             exit_reason = evaluate_exit(
                 snapshot,
@@ -53,25 +52,51 @@ class PositionManager:
                 earnings_calendar=self._earnings_calendar,
                 as_of=self._effective_as_of(),
             )
-            recorded_at = datetime.now(UTC)
-            if exit_reason is None:
-                self._audit_logger.update_managed_position(
-                    managed_position["position_id"],
-                    last_known_debit=float(snapshot.current_debit),
-                    last_evaluated_at=recorded_at.isoformat(),
-                )
-                continue
+            staged_evaluations.append(
+                {
+                    "managed_position": managed_position,
+                    "snapshot": snapshot,
+                    "exit_reason": exit_reason,
+                    "recorded_at": datetime.now(UTC),
+                }
+            )
 
+        submission_target = next(
+            (
+                staged
+                for staged in staged_evaluations
+                if staged["managed_position"]["status"] == "open"
+                and staged["exit_reason"] is not None
+            ),
+            None,
+        )
+        submission: dict[str, object] | None = None
+        if submission_target is not None:
+            snapshot = submission_target["snapshot"]
             submission = self._executor.submit_limit_combo(
                 snapshot,
                 limit_price=float(snapshot.current_debit),
             )
+
+        for staged in staged_evaluations:
+            managed_position = staged["managed_position"]
+            snapshot = staged["snapshot"]
+            updates: dict[str, Any] = {
+                "last_known_debit": float(snapshot.current_debit),
+                "last_evaluated_at": staged["recorded_at"].isoformat(),
+            }
+            if staged is submission_target:
+                updates["status"] = "closing"
             self._audit_logger.update_managed_position(
                 managed_position["position_id"],
-                status="closing",
-                last_known_debit=float(snapshot.current_debit),
-                last_evaluated_at=recorded_at.isoformat(),
+                **updates,
             )
+
+        if submission_target is not None and submission is not None:
+            managed_position = submission_target["managed_position"]
+            snapshot = submission_target["snapshot"]
+            exit_reason = submission_target["exit_reason"]
+            recorded_at = submission_target["recorded_at"]
             self._audit_logger.record_position_event(
                 managed_position["position_id"],
                 "close_submitted",
@@ -224,6 +249,12 @@ def _reconcile_positions(
     missing_fingerprints: list[str] = []
     for managed_position in managed_positions:
         identity = _managed_identity(managed_position)
+        stored_identity = _stored_identity(managed_position)
+        if stored_identity != identity:
+            missing_fingerprints.append(identity[0])
+            if identity in remaining_identities:
+                remaining_identities.remove(identity)
+            continue
         if identity not in remaining_identities:
             missing_fingerprints.append(identity[0])
             continue
@@ -256,6 +287,15 @@ def _managed_identity(
     managed_position: dict[str, Any],
 ) -> tuple[str, str]:
     return (
+        _managed_fingerprint(managed_position),
+        str(managed_position["strategy"]),
+    )
+
+
+def _stored_identity(
+    managed_position: dict[str, Any],
+) -> tuple[str, str]:
+    return (
         str(managed_position["broker_fingerprint"]),
         str(managed_position["strategy"]),
     )
@@ -263,6 +303,17 @@ def _managed_identity(
 
 def _identity_fingerprints(identities: set[tuple[str, str]]) -> list[str]:
     return sorted({fingerprint for fingerprint, _ in identities})
+
+
+def _managed_fingerprint(managed_position: dict[str, Any]) -> str:
+    strategy = str(managed_position["strategy"])
+    return (
+        f"{managed_position['ticker']}|{managed_position['expiry']}|"
+        f"{_option_right_for_strategy(strategy)}|"
+        f"{float(managed_position['short_strike'])}|"
+        f"{float(managed_position['long_strike'])}|"
+        f"{int(managed_position['quantity'])}"
+    )
 
 
 def _broker_identities(
@@ -312,6 +363,15 @@ def _broker_identities(
             )
         )
     return identities
+
+
+def _option_right_for_strategy(strategy: str) -> str:
+    normalized_strategy = strategy.lower()
+    if normalized_strategy == "bull_put_credit_spread":
+        return "P"
+    if normalized_strategy == "bear_call_credit_spread":
+        return "C"
+    raise ValueError(f"unsupported credit spread strategy: {strategy}")
 
 
 def _infer_credit_spread_strategy(
