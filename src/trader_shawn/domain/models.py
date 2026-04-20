@@ -9,29 +9,70 @@ from trader_shawn.domain.enums import DecisionAction, OptionRight, PositionSide
 
 @dataclass(slots=True)
 class OptionQuote:
-    ticker: str
-    contract_symbol: str
-    expiration: str
+    symbol: str
+    expiry: str
     strike: float
-    right: OptionRight
+    right: str
     bid: float
     ask: float
+    delta: float | None = None
     last: float | None = None
     mark: float | None = None
     volume: int = 0
     open_interest: int = 0
 
+    def __post_init__(self) -> None:
+        self.right = self.right.upper()
+        if self.right not in {"C", "P"}:
+            try:
+                option_right = OptionRight(self.right.lower())
+            except ValueError as exc:
+                raise ValueError(f"invalid option right: {self.right}") from exc
+            self.right = "C" if option_right is OptionRight.CALL else "P"
+
+    @property
+    def ticker(self) -> str:
+        return self.symbol
+
+    @property
+    def expiration(self) -> str:
+        return self.expiry
+
+    @property
+    def contract_symbol(self) -> str:
+        return f"{self.symbol}-{self.expiry}-{self.right}{self.strike:g}"
+
 
 @dataclass(slots=True)
 class CandidateSpread:
-    ticker: str
+    symbol: str
     strategy: str
     short_leg: OptionQuote
     long_leg: OptionQuote
-    net_credit: float
+    credit: float
     max_loss: float
     width: float
-    expiration: str
+    expiry: str
+
+    @property
+    def ticker(self) -> str:
+        return self.symbol
+
+    @property
+    def net_credit(self) -> float:
+        return self.credit
+
+    @property
+    def expiration(self) -> str:
+        return self.expiry
+
+    @property
+    def short_strike(self) -> float:
+        return self.short_leg.strike
+
+    @property
+    def long_strike(self) -> float:
+        return self.long_leg.strike
 
 
 @dataclass(slots=True)
