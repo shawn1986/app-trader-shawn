@@ -1,0 +1,8 @@
+max_risk_per_trade_pct: 0.02
+max_daily_loss_pct: 0.04
+max_new_positions_per_day: 6
+max_open_risk_pct: 0.20
+max_spreads_per_symbol: 2
+profit_take_pct: 0.50
+stop_loss_multiple: 2.0
+exit_dte_threshold: 5

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trader-shawn"
+version = "0.1.0"
+description = "Bootstrap for Trader Shawn settings and configuration."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7,<3",
+    "pyyaml>=6.0.1,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2,<9",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

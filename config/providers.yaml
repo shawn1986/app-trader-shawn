@@ -1,0 +1,5 @@
+provider_mode: claude_primary
+primary_provider: claude_cli
+secondary_provider: codex
+provider_timeout_seconds: 15
+secondary_timeout_seconds: 10

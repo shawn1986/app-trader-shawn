@@ -1,0 +1,7 @@
+mode: paper
+live_enabled: false
+ibkr:
+  host: 127.0.0.1
+  port: 7497
+  client_id: 7
+audit_db_path: runtime/audit.db
