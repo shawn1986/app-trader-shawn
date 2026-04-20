@@ -34,14 +34,6 @@ class OptionQuote:
     def ticker(self) -> str:
         return self.symbol
 
-    @property
-    def expiration(self) -> str:
-        return self.expiry
-
-    @property
-    def contract_symbol(self) -> str:
-        return f"{self.symbol}-{self.expiry}-{self.right}{self.strike:g}"
-
 
 @dataclass(slots=True)
 class CandidateSpread:
@@ -57,18 +49,6 @@ class CandidateSpread:
     short_delta: float
     pop: float
     bid_ask_ratio: float
-
-    @property
-    def symbol(self) -> str:
-        return self.ticker
-
-    @property
-    def net_credit(self) -> float:
-        return self.credit
-
-    @property
-    def expiration(self) -> str:
-        return self.expiry
 
     @property
     def short_strike(self) -> float:
