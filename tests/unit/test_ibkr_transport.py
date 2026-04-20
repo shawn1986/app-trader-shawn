@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+import math
 from types import SimpleNamespace
+
+import pytest
 
 from trader_shawn.domain.models import (
     AccountSnapshot,
@@ -90,11 +93,16 @@ class FakeIbModule:
 
 
 class FakeMarketDataClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        quote_overrides: dict[tuple[str, float], dict[str, object]] | None = None,
+    ) -> None:
         self.connected = False
         self.connect_calls: list[tuple[str, int, int]] = []
         self.qualified_contracts: list[object] = []
         self.ticker_requests: list[list[object]] = []
+        self.quote_overrides = quote_overrides or {}
 
     def isConnected(self) -> bool:
         return self.connected
@@ -135,6 +143,7 @@ class FakeMarketDataClient:
         tickers: list[object] = []
         for contract in contracts:
             strike = float(getattr(contract, "strike", 0.0))
+            right = str(getattr(contract, "right", "")).upper()
             bid = 1.1
             ask = 1.3
             last = 1.2
@@ -146,12 +155,13 @@ class FakeMarketDataClient:
                 bid = 0.72
                 ask = 0.84
                 last = 0.78
+            override = self.quote_overrides.get((right, strike), {})
             tickers.append(
                 SimpleNamespace(
                     contract=contract,
-                    bid=bid,
-                    ask=ask,
-                    last=last,
+                    bid=override.get("bid", bid),
+                    ask=override.get("ask", ask),
+                    last=override.get("last", last),
                     close=1.15,
                     bidGreeks=SimpleNamespace(delta=-0.21),
                     modelGreeks=None,
@@ -491,6 +501,38 @@ def test_ibkr_market_data_client_estimates_spread_debit_from_live_legs() -> None
     )
 
     assert debit == 0.63
+
+
+def test_ibkr_market_data_client_estimate_spread_debit_raises_when_short_close_ask_missing() -> None:
+    ib_client = FakeMarketDataClient(
+        quote_overrides={("P", 160.0): {"ask": None, "last": math.nan}}
+    )
+    client = IbkrMarketDataClient(client=ib_client, ibkr_module=FakeIbModule())
+
+    with pytest.raises(RuntimeError, match="short leg close ask"):
+        client.estimate_spread_debit(
+            ticker="AMD",
+            expiry="2026-04-30",
+            short_strike=160.0,
+            long_strike=155.0,
+            strategy="bull_put_credit_spread",
+        )
+
+
+def test_ibkr_market_data_client_estimate_spread_debit_raises_when_long_close_bid_missing_for_bear_call() -> None:
+    ib_client = FakeMarketDataClient(
+        quote_overrides={("C", 160.0): {"bid": None, "last": math.nan}}
+    )
+    client = IbkrMarketDataClient(client=ib_client, ibkr_module=FakeIbModule())
+
+    with pytest.raises(RuntimeError, match="long leg close bid"):
+        client.estimate_spread_debit(
+            ticker="AMD",
+            expiry="2026-04-30",
+            short_strike=155.0,
+            long_strike=160.0,
+            strategy="bear_call_credit_spread",
+        )
 
 
 def test_ibkr_executor_submit_limit_combo_returns_broker_fingerprint() -> None:

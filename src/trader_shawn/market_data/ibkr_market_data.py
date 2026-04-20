@@ -188,7 +188,7 @@ class IbkrMarketDataClient:
         exchange: str = "SMART",
         currency: str = "USD",
     ) -> float:
-        quotes = self._fetch_contract_quotes(
+        quote_rows = self._fetch_contract_quote_rows(
             ticker=ticker,
             contracts=[
                 self._resolve_ibkr_module().Option(
@@ -209,13 +209,23 @@ class IbkrMarketDataClient:
                 ),
             ],
         )
-        quotes_by_strike = {quote.strike: quote for quote in quotes}
+        quotes_by_strike = {float(row["strike"]): row for row in quote_rows}
         try:
             short_leg = quotes_by_strike[float(short_strike)]
             long_leg = quotes_by_strike[float(long_strike)]
         except KeyError as exc:
             raise RuntimeError("IBKR returned incomplete spread leg quotes") from exc
-        return round(short_leg.ask - long_leg.bid, 2)
+        short_close_ask = _require_quote_price(
+            short_leg.get("ask"),
+            leg_name="short leg",
+            price_name="close ask",
+        )
+        long_close_bid = _require_quote_price(
+            long_leg.get("bid"),
+            leg_name="long leg",
+            price_name="close bid",
+        )
+        return round(short_close_ask - long_close_bid, 2)
 
     def count_open_option_positions(self, *, symbol: str | None = None) -> int:
         count = 0
@@ -258,8 +268,8 @@ class IbkrMarketDataClient:
                     expiry=str(row["expiry"]),
                     strike=float(row["strike"]),
                     right=str(row["right"]),
-                    bid=float(row["bid"]),
-                    ask=float(row["ask"]),
+                    bid=_finite_or_zero(row["bid"]),
+                    ask=_finite_or_zero(row["ask"]),
                     delta=_optional_float(row.get("delta")),
                     last=_optional_float(row.get("last")),
                     mark=_optional_float(row.get("mark")),
@@ -283,19 +293,16 @@ class IbkrMarketDataClient:
             self._ibkr_module = import_module("ib_insync")
         return self._ibkr_module
 
-    def _fetch_contract_quotes(
+    def _fetch_contract_quote_rows(
         self,
         *,
         ticker: str,
         contracts: Iterable[Any],
-    ) -> list[OptionQuote]:
+    ) -> list[dict[str, object]]:
         client = self.ensure_connected()
         qualified_contracts = list(client.qualifyContracts(*list(contracts)))
         snapshots = list(client.reqTickers(*qualified_contracts))
-        return self.normalize_option_quotes(
-            ticker,
-            [_ticker_to_quote_row(snapshot) for snapshot in snapshots],
-        )
+        return [_ticker_to_quote_row(snapshot) for snapshot in snapshots]
 
 
 def _bounded_expiries(
@@ -360,14 +367,26 @@ def _ticker_to_quote_row(snapshot: Any) -> dict[str, object]:
         "expiry": _normalize_expiry(str(contract.lastTradeDateOrContractMonth)),
         "strike": float(contract.strike),
         "right": right,
-        "bid": _finite_or_zero(getattr(snapshot, "bid", None)),
-        "ask": _finite_or_zero(getattr(snapshot, "ask", None)),
+        "bid": _optional_float(getattr(snapshot, "bid", None)),
+        "ask": _optional_float(getattr(snapshot, "ask", None)),
         "delta": _extract_delta(snapshot),
         "last": _optional_float(getattr(snapshot, "last", None)),
         "mark": _ticker_mark(snapshot),
         "volume": _extract_option_metric(snapshot, right, "volume"),
         "open_interest": _extract_option_metric(snapshot, right, "open_interest"),
     }
+
+
+def _require_quote_price(
+    value: object,
+    *,
+    leg_name: str,
+    price_name: str,
+) -> float:
+    parsed = _optional_float(value)
+    if parsed is None:
+        raise RuntimeError(f"IBKR returned no {leg_name} {price_name}")
+    return parsed
 
 
 def _is_live_option_position(position: Any) -> bool:
