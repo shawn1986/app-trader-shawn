@@ -173,14 +173,24 @@ class AccountSnapshot:
 @dataclass(slots=True)
 class PositionSnapshot:
     ticker: str
-    quantity: int
-    average_cost: float
-    market_value: float
-    unrealized_pnl: float
-    side: PositionSide
+    quantity: int = 1
+    average_cost: float = 0.0
+    market_value: float = 0.0
+    unrealized_pnl: float = 0.0
+    side: PositionSide | str | None = None
+    strategy: str = ""
+    expiry: str = ""
+    short_strike: float | None = None
+    long_strike: float | None = None
+    entry_credit: float = 0.0
+    current_debit: float = 0.0
+    dte: int = 0
+    short_leg_distance_pct: float | None = None
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
+        if self.side is None:
+            return
         try:
             self.side = PositionSide(self.side)
         except ValueError as exc:
