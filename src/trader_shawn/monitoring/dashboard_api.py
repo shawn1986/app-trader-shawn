@@ -13,9 +13,9 @@ def _snapshot_shape(
     error: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return {
-        "status": status,
-        "last_cycle": dict(last_cycle or {}),
-        "error": error,
+        "status": _normalize_snapshot_status(status),
+        "last_cycle": _normalize_last_cycle(last_cycle),
+        "error": _normalize_error(error),
     }
 
 
@@ -35,7 +35,7 @@ def read_dashboard_snapshot(path: str | Path) -> dict[str, Any]:
         return _snapshot_shape()
 
     return _snapshot_shape(
-        status=str(loaded.get("status", "idle")),
+        status=loaded.get("status", "idle"),
         last_cycle=loaded.get("last_cycle"),
         error=loaded.get("error"),
     )
@@ -52,3 +52,41 @@ def update_dashboard_state(path: str | Path, *, last_cycle: dict[str, Any]) -> d
     snapshot = build_dashboard_snapshot(last_cycle=last_cycle)
     StateStore(Path(path)).save(snapshot)
     return snapshot
+
+
+def _normalize_snapshot_status(status: Any) -> str:
+    return status if isinstance(status, str) and status else "idle"
+
+
+def _normalize_last_cycle(last_cycle: Any) -> dict[str, Any]:
+    if not isinstance(last_cycle, dict):
+        return {}
+
+    normalized: dict[str, Any] = {}
+    for key in ("status", "reason", "action", "error_type", "message"):
+        value = last_cycle.get(key)
+        if isinstance(value, str) and value:
+            normalized[key] = value
+
+    if "payload" in last_cycle:
+        payload = last_cycle.get("payload")
+        normalized["payload"] = dict(payload) if isinstance(payload, dict) else {}
+
+    return normalized
+
+
+def _normalize_error(error: Any) -> dict[str, str] | None:
+    if not isinstance(error, dict):
+        return None
+
+    error_type = error.get("type")
+    message = error.get("message")
+    if not isinstance(error_type, str) or not error_type:
+        return None
+    if not isinstance(message, str) or not message:
+        return None
+
+    return {
+        "type": error_type,
+        "message": message,
+    }

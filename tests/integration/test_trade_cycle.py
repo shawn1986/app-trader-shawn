@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import math
+import json
 from pathlib import Path
 
-from trader_shawn.app import run_trade_cycle
+from click.testing import CliRunner
+
+from trader_shawn.app import cli, run_trade_cycle
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread
 from trader_shawn.monitoring.dashboard_api import (
     build_dashboard_snapshot,
@@ -92,6 +96,14 @@ class StubRiskGuard:
         return GuardResult()
 
 
+class PayloadDecisionService:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def decide(self, _: dict):
+        return type("Decision", (), self.payload)()
+
+
 def _spread(
     *,
     ticker: str = "AMD",
@@ -141,6 +153,16 @@ def test_run_trade_cycle_returns_no_candidates_without_decision_or_submission() 
     assert result == {"status": "no_candidates"}
     assert decision_service.calls == []
     assert executor.calls == []
+
+
+def test_cli_is_invokable_via_click_runner() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["--help"])
+
+    assert result.exit_code == 0
+    assert "trade-cycle" in result.output
+    assert "dashboard" in result.output
 
 
 def test_run_trade_cycle_stops_when_decision_is_not_approve() -> None:
@@ -199,6 +221,103 @@ def test_run_trade_cycle_returns_structured_error_when_decision_service_raises()
         "reason": "decision_service_failed",
         "error_type": "RuntimeError",
         "message": "service offline",
+    }
+
+
+def test_run_trade_cycle_returns_structured_error_for_missing_approval_expiry() -> None:
+    result = run_trade_cycle(
+        candidates=[_spread()],
+        account=_account(),
+        decision_service=PayloadDecisionService(
+            {
+                "action": "approve",
+                "ticker": "AMD",
+                "strategy": "bull_put_credit_spread",
+                "short_strike": 160,
+                "long_strike": 155,
+                "limit_credit": 1.05,
+            }
+        ),
+        executor=StubExecutor(),
+    )
+
+    assert result == {
+        "status": "decision_error",
+        "reason": "invalid_approval",
+        "error_type": "AttributeError",
+        "message": "'Decision' object has no attribute 'expiry'",
+    }
+
+
+def test_run_trade_cycle_returns_structured_error_for_missing_approval_strikes() -> None:
+    result = run_trade_cycle(
+        candidates=[_spread()],
+        account=_account(),
+        decision_service=PayloadDecisionService(
+            {
+                "action": "approve",
+                "ticker": "AMD",
+                "strategy": "bull_put_credit_spread",
+                "expiry": "2026-04-30",
+                "limit_credit": 1.05,
+            }
+        ),
+        executor=StubExecutor(),
+    )
+
+    assert result == {
+        "status": "decision_error",
+        "reason": "invalid_approval",
+        "error_type": "AttributeError",
+        "message": "'Decision' object has no attribute 'short_strike'",
+    }
+
+
+def test_run_trade_cycle_returns_structured_error_for_none_limit_credit() -> None:
+    result = run_trade_cycle(
+        candidates=[_spread()],
+        account=_account(),
+        decision_service=StubDecisionService(limit_credit=None),
+        executor=StubExecutor(),
+    )
+
+    assert result == {
+        "status": "decision_error",
+        "reason": "invalid_approval",
+        "error_type": "TypeError",
+        "message": "float() argument must be a string or a real number, not 'NoneType'",
+    }
+
+
+def test_run_trade_cycle_returns_structured_error_for_zero_limit_credit() -> None:
+    result = run_trade_cycle(
+        candidates=[_spread()],
+        account=_account(),
+        decision_service=StubDecisionService(limit_credit=0),
+        executor=StubExecutor(),
+    )
+
+    assert result == {
+        "status": "decision_error",
+        "reason": "invalid_approval",
+        "error_type": "ValueError",
+        "message": "limit_credit must be a positive finite number",
+    }
+
+
+def test_run_trade_cycle_returns_structured_error_for_nan_limit_credit() -> None:
+    result = run_trade_cycle(
+        candidates=[_spread()],
+        account=_account(),
+        decision_service=StubDecisionService(limit_credit=math.nan),
+        executor=StubExecutor(),
+    )
+
+    assert result == {
+        "status": "decision_error",
+        "reason": "invalid_approval",
+        "error_type": "ValueError",
+        "message": "limit_credit must be a positive finite number",
     }
 
 
@@ -296,6 +415,35 @@ def test_read_dashboard_snapshot_returns_error_shape_for_corrupt_state(
     assert snapshot["error"] == {
         "type": "StateStoreError",
         "message": f"invalid state file: {state_path}",
+    }
+
+
+def test_read_dashboard_snapshot_normalizes_nested_fields(tmp_path: Path) -> None:
+    state_path = tmp_path / "dashboard.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "status": 123,
+                "last_cycle": {
+                    "status": ["bad"],
+                    "payload": "not-a-dict",
+                    "reason": 99,
+                },
+                "error": {
+                    "type": 7,
+                    "message": ["oops"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = read_dashboard_snapshot(state_path)
+
+    assert snapshot == {
+        "status": "idle",
+        "last_cycle": {"payload": {}},
+        "error": None,
     }
 
 

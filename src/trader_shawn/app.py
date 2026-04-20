@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import argparse
 import json
 import math
+from pathlib import Path
 from typing import Any, Sequence
+
+import click
 
 from trader_shawn.domain.enums import DecisionAction, PositionSide
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread, PositionSnapshot
@@ -52,7 +54,17 @@ def run_trade_cycle(
             "action": action.value,
         }
 
-    matched_spread = _resolve_approved_candidate(candidates, decision)
+    try:
+        approved_candidate_key = _approved_candidate_key(decision)
+        limit_credit = _decision_limit_credit(decision)
+    except (AttributeError, TypeError, ValueError) as exc:
+        return _error_result(
+            status="decision_error",
+            reason="invalid_approval",
+            exc=exc,
+        )
+
+    matched_spread = _resolve_approved_candidate(candidates, approved_candidate_key)
     if matched_spread is None:
         return {
             "status": "decision_rejected",
@@ -67,15 +79,6 @@ def run_trade_cycle(
         )
         if not guard_result.allowed:
             return {"status": "risk_rejected", "reason": guard_result.reason}
-
-    try:
-        limit_credit = _decision_limit_credit(decision)
-    except (AttributeError, TypeError, ValueError) as exc:
-        return _error_result(
-            status="decision_error",
-            reason="invalid_approval",
-            exc=exc,
-        )
 
     position = PositionSnapshot(
         ticker=matched_spread.ticker,
@@ -100,43 +103,45 @@ def run_trade_cycle(
         )
 
 
-def cli(argv: Sequence[str] | None = None) -> int:
-    parser = _build_cli_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
-    result = args.handler(args)
-    if result is not None:
-        print(json.dumps(result, sort_keys=True))
-    return 0
+@click.group(name="trader-shawn")
+def cli() -> None:
+    """Trader Shawn command line interface."""
+
+
+@cli.command("trade-cycle")
+def trade_cycle_command() -> None:
+    click.echo(json.dumps(_trade_cycle_command(), sort_keys=True))
+
+
+@cli.command("dashboard")
+@click.argument("state_path", type=click.Path(path_type=Path))
+def dashboard_command(state_path: Path) -> None:
+    click.echo(json.dumps(_dashboard_command(state_path), sort_keys=True))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    return cli(argv)
+    cli.main(
+        args=list(argv) if argv is not None else None,
+        prog_name="trader-shawn",
+        standalone_mode=False,
+    )
+    return 0
 
 
-def _build_cli_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="trader-shawn")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    trade_cycle = subparsers.add_parser("trade-cycle", help="Run one trade cycle")
-    trade_cycle.set_defaults(handler=_trade_cycle_command)
-
-    dashboard = subparsers.add_parser("dashboard", help="Print dashboard status")
-    dashboard.add_argument("state_path", help="Path to the persisted dashboard state JSON file")
-    dashboard.set_defaults(handler=_dashboard_command)
-    return parser
+def _approved_candidate_key(decision: Any) -> tuple[str, str, float, float]:
+    return (
+        str(getattr(decision, "ticker")),
+        str(getattr(decision, "expiry")),
+        float(getattr(decision, "short_strike")),
+        float(getattr(decision, "long_strike")),
+    )
 
 
 def _resolve_approved_candidate(
     candidates: Sequence[CandidateSpread],
-    decision: Any,
+    approved_candidate_key: tuple[str, str, float, float],
 ) -> CandidateSpread | None:
-    try:
-        ticker = str(getattr(decision, "ticker"))
-        expiry = str(getattr(decision, "expiry"))
-        short_strike = float(getattr(decision, "short_strike"))
-        long_strike = float(getattr(decision, "long_strike"))
-    except (AttributeError, TypeError, ValueError):
-        return None
+    ticker, expiry, short_strike, long_strike = approved_candidate_key
 
     for candidate in candidates:
         if (
@@ -172,14 +177,14 @@ def _error_result(*, status: str, reason: str, exc: Exception) -> dict[str, str]
     }
 
 
-def _trade_cycle_command(_: argparse.Namespace) -> dict[str, str]:
+def _trade_cycle_command() -> dict[str, str]:
     return {"status": "not_implemented"}
 
 
-def _dashboard_command(args: argparse.Namespace) -> dict[str, Any]:
+def _dashboard_command(state_path: str | Path) -> dict[str, Any]:
     from trader_shawn.monitoring.dashboard_api import read_dashboard_snapshot
 
-    return read_dashboard_snapshot(args.state_path)
+    return read_dashboard_snapshot(state_path)
 
 
 if __name__ == "__main__":
