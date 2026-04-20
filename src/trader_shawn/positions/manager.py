@@ -177,12 +177,15 @@ class PositionManager:
     ) -> None:
         for managed_position in managed_positions:
             recorded_at = datetime.now(UTC)
-            self._audit_logger.update_managed_position(
+            claimed = self._audit_logger.update_managed_position_if_status(
                 managed_position["position_id"],
+                expected_status="closing",
                 status="closed",
                 closed_at=recorded_at.isoformat(),
                 last_evaluated_at=recorded_at.isoformat(),
             )
+            if not claimed:
+                continue
             self._audit_logger.record_position_event(
                 managed_position["position_id"],
                 "closed",

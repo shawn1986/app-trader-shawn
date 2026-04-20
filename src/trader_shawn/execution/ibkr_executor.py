@@ -69,14 +69,13 @@ class IbkrExecutor:
         return submission
 
     def _submit_combo_order(self, payload: dict[str, object]) -> dict[str, object]:
-        client = self._ensure_connected()
-        ibkr = self._resolve_ibkr_module()
-        symbol = str(payload["symbol"])
-        exchange = str(payload["exchange"])
-        currency = str(payload["currency"])
-        leg_payloads = list(payload["legs"])
-
         try:
+            client = self._ensure_connected()
+            ibkr = self._resolve_ibkr_module()
+            symbol = str(payload["symbol"])
+            exchange = str(payload["exchange"])
+            currency = str(payload["currency"])
+            leg_payloads = list(payload["legs"])
             qualified_legs = list(
                 client.qualifyContracts(
                     *[

@@ -769,6 +769,80 @@ def test_ibkr_executor_submit_limit_combo_raises_order_not_submitted_error_when_
         executor.submit_limit_combo(position, limit_price=0.45)
 
 
+def test_manage_positions_treats_connect_failure_as_pre_submit(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "",
+        }
+    )
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+            ],
+            spread_debit=0.42,
+            spot_price=171.0,
+        ),
+        executor=IbkrExecutor(
+            client=_FailingConnectIbClient(),
+            ibkr_module=_FakeIbModule(),
+        ),
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    with pytest.raises(OrderNotSubmittedError, match="connect failed"):
+        manager.manage_positions()
+
+    persisted = logger.fetch_active_managed_positions(mode="paper")[0]
+    assert persisted["status"] == "open"
+    assert persisted["last_known_debit"] == 0.42
+    assert persisted["last_evaluated_at"] is not None
+    assert logger.fetch_position_events("pos-1") == []
+
+
 def test_manage_positions_fails_closed_on_unknown_broker_option_position(
     tmp_path: Path,
 ) -> None:
@@ -2302,6 +2376,112 @@ def test_manage_positions_finalizes_missing_closing_positions_before_returning_u
     assert closed_at is not None
 
 
+def test_manage_positions_skips_duplicate_closed_event_when_missing_closing_finalization_claim_fails(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "audit.db"
+    base_logger = AuditLogger(db_path)
+    base_logger.upsert_managed_position(
+        {
+            "position_id": "pos-uncertain",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "closing",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": 0.42,
+            "last_evaluated_at": "2026-04-20T10:00:00+00:00",
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "close in progress",
+            "risk_note": "",
+        }
+    )
+    base_logger.record_position_event(
+        "pos-uncertain",
+        "close_submit_uncertain",
+        {
+            "exit_reason": "take_profit",
+            "limit_price": 0.42,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "error": "submit temporarily unavailable",
+        },
+    )
+    base_logger.upsert_managed_position(
+        {
+            "position_id": "pos-missing",
+            "ticker": "NVDA",
+            "strategy": "bear_call_credit_spread",
+            "expiry": "2026-05-15",
+            "short_strike": 125.0,
+            "long_strike": 130.0,
+            "quantity": 1,
+            "entry_credit": 1.10,
+            "entry_order_id": 322,
+            "mode": "paper",
+            "status": "closed",
+            "opened_at": "2026-04-20T09:32:00+00:00",
+            "closed_at": "2026-04-20T10:10:00+00:00",
+            "last_known_debit": 0.55,
+            "last_evaluated_at": "2026-04-20T10:10:00+00:00",
+            "broker_fingerprint": "NVDA|2026-05-15|C|125.0|130.0|1",
+            "decision_reason": "close in progress",
+            "risk_note": "",
+        }
+    )
+    logger = StaleClosingFinalizeAuditLogger(base_logger)
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+            ],
+            spread_debit=0.42,
+            spot_price=171.0,
+        ),
+        executor=FakeManageExecutor(),
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    assert result == {
+        "status": "anomaly",
+        "reason": "uncertain_submit_state",
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "manual_intervention_required": True,
+    }
+    assert base_logger.fetch_position_events("pos-missing") == []
+
+
 class _FakeOption:
     def __init__(
         self,
@@ -2392,6 +2572,14 @@ class _FakeIbClient:
 class _FailingQualificationIbClient(_FakeIbClient):
     def qualifyContracts(self, *contracts: _FakeOption) -> list[_FakeOption]:
         return list(contracts[:-1])
+
+
+class _FailingConnectIbClient(_FakeIbClient):
+    def isConnected(self) -> bool:
+        return False
+
+    def connect(self, host: str, port: int, *, clientId: int) -> None:
+        raise RuntimeError("connect failed")
 
 
 class _FailingPlaceOrderIbClient(_FakeIbClient):
@@ -2555,6 +2743,81 @@ class FailingClosingUpdateAuditLogger:
         if updates.get("status") == "closing":
             raise RuntimeError("closing update failed")
         self._base_logger.update_managed_position(position_id, **updates)
+
+    def record_position_event(
+        self,
+        position_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        *,
+        created_at: datetime | None = None,
+    ) -> None:
+        self._base_logger.record_position_event(
+            position_id,
+            event_type,
+            payload,
+            created_at=created_at,
+        )
+
+
+class StaleClosingFinalizeAuditLogger:
+    def __init__(self, base_logger: AuditLogger) -> None:
+        self._base_logger = base_logger
+
+    def fetch_active_managed_positions(self, *, mode: str) -> list[dict[str, object]]:
+        positions = self._base_logger.fetch_active_managed_positions(mode=mode)
+        return [
+            position
+            for position in positions
+            if position["position_id"] != "pos-missing"
+        ] + [
+            {
+                **next(
+                    position
+                    for position in [
+                        {
+                            "position_id": "pos-missing",
+                            "ticker": "NVDA",
+                            "strategy": "bear_call_credit_spread",
+                            "expiry": "2026-05-15",
+                            "short_strike": 125.0,
+                            "long_strike": 130.0,
+                            "quantity": 1,
+                            "entry_credit": 1.10,
+                            "entry_order_id": 322,
+                            "mode": "paper",
+                            "status": "closing",
+                            "opened_at": "2026-04-20T09:32:00+00:00",
+                            "closed_at": None,
+                            "last_known_debit": 0.55,
+                            "last_evaluated_at": "2026-04-20T10:05:00+00:00",
+                            "broker_fingerprint": "NVDA|2026-05-15|C|125.0|130.0|1",
+                            "decision_reason": "close in progress",
+                            "risk_note": "",
+                        }
+                    ]
+                )
+            }
+        ]
+
+    def fetch_position_events(self, position_id: str) -> list[dict[str, object]]:
+        return self._base_logger.fetch_position_events(position_id)
+
+    def update_managed_position(self, position_id: str, **updates: object) -> None:
+        self._base_logger.update_managed_position(position_id, **updates)
+
+    def update_managed_position_if_status(
+        self,
+        position_id: str,
+        *,
+        expected_status: str,
+        **updates: object,
+    ) -> bool:
+        return self._base_logger.update_managed_position_if_status(
+            position_id,
+            expected_status=expected_status,
+            **updates,
+        )
 
     def record_position_event(
         self,
