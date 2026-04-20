@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ContextManager
 
 from trader_shawn.domain.models import (
     DecisionRecord,
@@ -40,10 +41,11 @@ class AuditLogger:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> ContextManager[sqlite3.Connection]:
         connection = sqlite3.connect(self._db_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        connection.execute("pragma foreign_keys = on")
+        return closing(connection)
 
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
@@ -199,7 +201,7 @@ class AuditLogger:
                 f"""
                 select {", ".join(self._MANAGED_POSITION_COLUMNS)}
                 from managed_positions
-                where mode = ? and status != 'closed'
+                where mode = ? and status in ('open', 'closing')
                 order by opened_at asc, position_id asc
                 """,
                 (mode,),

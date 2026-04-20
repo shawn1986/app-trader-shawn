@@ -1,14 +1,16 @@
 from pathlib import Path
+import sqlite3
 
 import pytest
 
-from trader_shawn.domain.models import PositionSnapshot
+from trader_shawn.domain.models import ManagedPositionRecord, PositionSnapshot
 from trader_shawn.events.earnings_calendar import EarningsCalendar
+from trader_shawn.monitoring import audit_logger as audit_logger_module
 from trader_shawn.monitoring.audit_logger import AuditLogger
 from trader_shawn.execution.ibkr_executor import IbkrExecutor
 from trader_shawn.execution.order_builder import build_credit_spread_combo_order
 from trader_shawn.positions.manager import evaluate_exit
-from datetime import date
+from datetime import UTC, date, datetime
 
 
 def test_audit_logger_persists_and_updates_managed_position(tmp_path: Path) -> None:
@@ -75,6 +77,128 @@ def test_audit_logger_persists_and_updates_managed_position(tmp_path: Path) -> N
     ]
     assert events[0]["event_type"] == "opened"
     assert events[0]["payload"] == {"entry_order_id": 321}
+
+
+def test_audit_logger_rejects_orphan_position_event(tmp_path: Path) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        logger.record_position_event(
+            "missing-position",
+            "opened",
+            {"entry_order_id": 321},
+        )
+
+
+def test_fetch_active_managed_positions_only_returns_open_and_closing(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+
+    logger.upsert_managed_position(
+        ManagedPositionRecord(
+            position_id="pos-open",
+            ticker="AMD",
+            strategy="bull_put_credit_spread",
+            expiry="2026-04-30",
+            short_strike=160.0,
+            long_strike=155.0,
+            quantity=1,
+            entry_credit=1.05,
+            entry_order_id=321,
+            mode="paper",
+            status="open",
+            opened_at=datetime(2026, 4, 20, 9, 31, tzinfo=UTC),
+            last_evaluated_at=datetime(2026, 4, 20, 10, 0, tzinfo=UTC),
+            broker_fingerprint="AMD|2026-04-30|P|160.0|155.0|1",
+            decision_reason="opened by system",
+            risk_note="initial",
+        )
+    )
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-closing",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 322,
+            "mode": "paper",
+            "status": "closing",
+            "opened_at": "2026-04-20T09:32:00+00:00",
+            "closed_at": None,
+            "last_known_debit": 0.55,
+            "last_evaluated_at": "2026-04-20T10:05:00+00:00",
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|2",
+            "decision_reason": "close in progress",
+            "risk_note": "watch fill",
+        }
+    )
+    for position_id, status in (
+        ("pos-closed", "closed"),
+        ("pos-cancelled", "cancelled"),
+    ):
+        logger.upsert_managed_position(
+            {
+                "position_id": position_id,
+                "ticker": "AMD",
+                "strategy": "bull_put_credit_spread",
+                "expiry": "2026-04-30",
+                "short_strike": 160.0,
+                "long_strike": 155.0,
+                "quantity": 1,
+                "entry_credit": 1.05,
+                "entry_order_id": 323,
+                "mode": "paper",
+                "status": status,
+                "opened_at": "2026-04-20T09:33:00+00:00",
+                "closed_at": None,
+                "last_known_debit": None,
+                "last_evaluated_at": None,
+                "broker_fingerprint": f"AMD|2026-04-30|P|160.0|155.0|{status}",
+                "decision_reason": status,
+                "risk_note": status,
+            }
+        )
+
+    positions = logger.fetch_active_managed_positions(mode="paper")
+
+    assert [position["position_id"] for position in positions] == [
+        "pos-open",
+        "pos-closing",
+    ]
+    assert positions[0]["opened_at"] == "2026-04-20T09:31:00+00:00"
+    assert positions[0]["last_evaluated_at"] == "2026-04-20T10:00:00+00:00"
+
+
+def test_audit_logger_closes_sqlite_connections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened_connection_ids: list[int] = []
+    closed_connection_ids: list[int] = []
+    original_connect = sqlite3.connect
+
+    class TrackingConnection(sqlite3.Connection):
+        def close(self) -> None:
+            closed_connection_ids.append(id(self))
+            super().close()
+
+    def tracking_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs, factory=TrackingConnection)
+        opened_connection_ids.append(id(connection))
+        return connection
+
+    monkeypatch.setattr(audit_logger_module.sqlite3, "connect", tracking_connect)
+
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.fetch_active_managed_positions(mode="paper")
+
+    assert opened_connection_ids
+    assert closed_connection_ids == opened_connection_ids
 
 
 def test_evaluate_exit_returns_take_profit_when_debit_reaches_half_credit() -> None:
