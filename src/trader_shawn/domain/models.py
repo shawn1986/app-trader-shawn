@@ -38,14 +38,20 @@ class CandidateSpread:
 class DecisionRecord:
     cycle_id: str
     provider: str
-    action: str | DecisionAction
+    action: DecisionAction
     ticker: str
     payload: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
+    def __post_init__(self) -> None:
+        try:
+            self.action = DecisionAction(self.action)
+        except ValueError as exc:
+            raise ValueError(f"invalid decision action: {self.action}") from exc
+
     def to_row(self) -> dict[str, Any]:
         row = asdict(self)
-        row["action"] = str(self.action)
+        row["action"] = self.action.value
         row["created_at"] = self.created_at.isoformat()
         return row
 
