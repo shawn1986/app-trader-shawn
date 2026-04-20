@@ -43,7 +43,15 @@ def test_build_candidates_filters_liquidity_and_creates_bull_put_spread() -> Non
 
     assert len(candidates) == 1
     candidate = candidates[0]
+    assert candidate.ticker == "AMD"
     assert candidate.strategy == "bull_put_credit_spread"
+    assert candidate.expiry == "2026-04-30"
+    assert candidate.dte == 10
     assert candidate.short_strike == 160
     assert candidate.long_strike == 155
+    assert candidate.width == 5
     assert round(candidate.credit, 2) == 0.75
+    assert round(candidate.max_loss, 2) == 4.25
+    assert round(candidate.short_delta, 2) == -0.22
+    assert round(candidate.pop, 2) == 0.78
+    assert round(candidate.bid_ask_ratio, 2) == 0.87

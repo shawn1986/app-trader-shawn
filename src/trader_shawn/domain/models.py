@@ -45,18 +45,22 @@ class OptionQuote:
 
 @dataclass(slots=True)
 class CandidateSpread:
-    symbol: str
+    ticker: str
     strategy: str
     short_leg: OptionQuote
     long_leg: OptionQuote
+    dte: int
     credit: float
     max_loss: float
     width: float
     expiry: str
+    short_delta: float
+    pop: float
+    bid_ask_ratio: float
 
     @property
-    def ticker(self) -> str:
-        return self.symbol
+    def symbol(self) -> str:
+        return self.ticker
 
     @property
     def net_credit(self) -> float:
