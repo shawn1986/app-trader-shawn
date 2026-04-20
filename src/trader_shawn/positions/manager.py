@@ -198,44 +198,48 @@ def _reconcile_positions(
 ) -> dict[str, object]:
     if not managed_positions and broker_positions:
         fingerprints = _broker_fingerprints(broker_positions)
-        if fingerprints is None:
-            return {
-                "status": "anomaly",
-                "reason": "unknown_broker_position",
-            }
-        return {
-            "status": "anomaly",
-            "reason": "unknown_broker_position",
-            "broker_fingerprints": sorted(fingerprints),
-        }
+        return _anomaly_result(
+            reason="unknown_broker_position",
+            fingerprints=[] if fingerprints is None else sorted(fingerprints),
+        )
 
     broker_fingerprints = _broker_fingerprints(broker_positions)
     if broker_fingerprints is None:
-        return {
-            "status": "anomaly",
-            "reason": "unknown_broker_position",
-        }
+        return _anomaly_result(
+            reason="unknown_broker_position",
+            fingerprints=[],
+        )
 
     remaining_fingerprints = set(broker_fingerprints)
+    missing_fingerprints: list[str] = []
     for managed_position in managed_positions:
         fingerprint = str(managed_position["broker_fingerprint"])
         if fingerprint not in remaining_fingerprints:
-            return {
-                "status": "anomaly",
-                "reason": "missing_broker_position",
-                "position_id": managed_position["position_id"],
-                "broker_fingerprint": fingerprint,
-            }
+            missing_fingerprints.append(fingerprint)
+            continue
         remaining_fingerprints.remove(fingerprint)
 
+    if missing_fingerprints:
+        return _anomaly_result(
+            reason="missing_broker_position",
+            fingerprints=sorted(missing_fingerprints),
+        )
+
     if remaining_fingerprints:
-        return {
-            "status": "anomaly",
-            "reason": "unknown_broker_position",
-            "broker_fingerprints": sorted(remaining_fingerprints),
-        }
+        return _anomaly_result(
+            reason="unknown_broker_position",
+            fingerprints=sorted(remaining_fingerprints),
+        )
 
     return {"status": "ok"}
+
+
+def _anomaly_result(*, reason: str, fingerprints: list[str]) -> dict[str, object]:
+    return {
+        "status": "anomaly",
+        "reason": reason,
+        "fingerprints": fingerprints,
+    }
 
 
 def _broker_fingerprints(

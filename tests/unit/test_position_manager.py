@@ -763,6 +763,157 @@ def test_manage_positions_submits_close_for_take_profit(tmp_path: Path) -> None:
     assert logger.fetch_position_events("pos-1")[-1]["event_type"] == "close_submitted"
 
 
+def test_manage_positions_fails_closed_when_unknown_broker_position_exists_alongside_matching_managed_position(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "",
+        }
+    )
+    executor = FakeManageExecutor()
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+                BrokerOptionPosition(
+                    ticker="NVDA",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=110.0,
+                    broker_position_id="90110",
+                ),
+                BrokerOptionPosition(
+                    ticker="NVDA",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=105.0,
+                    broker_position_id="90105",
+                ),
+            ],
+            spread_debit=0.42,
+            spot_price=171.0,
+        ),
+        executor=executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    assert result == {
+        "status": "anomaly",
+        "reason": "unknown_broker_position",
+        "fingerprints": ["NVDA|2026-04-30|P|110.0|105.0|1"],
+    }
+    assert executor.calls == []
+    assert logger.fetch_active_managed_positions(mode="paper")[0]["status"] == "open"
+    assert logger.fetch_position_events("pos-1") == []
+
+
+def test_manage_positions_returns_all_missing_fingerprints_when_broker_positions_are_missing(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    for position_id, fingerprint in (
+        ("pos-1", "AMD|2026-04-30|P|160.0|155.0|1"),
+        ("pos-2", "NVDA|2026-05-15|C|125.0|130.0|1"),
+    ):
+        logger.upsert_managed_position(
+            {
+                "position_id": position_id,
+                "ticker": "AMD" if position_id == "pos-1" else "NVDA",
+                "strategy": (
+                    "bull_put_credit_spread"
+                    if position_id == "pos-1"
+                    else "bear_call_credit_spread"
+                ),
+                "expiry": "2026-04-30" if position_id == "pos-1" else "2026-05-15",
+                "short_strike": 160.0 if position_id == "pos-1" else 125.0,
+                "long_strike": 155.0 if position_id == "pos-1" else 130.0,
+                "quantity": 1,
+                "entry_credit": 1.05,
+                "entry_order_id": 321,
+                "mode": "paper",
+                "status": "open",
+                "opened_at": "2026-04-20T09:31:00+00:00",
+                "closed_at": None,
+                "last_known_debit": None,
+                "last_evaluated_at": None,
+                "broker_fingerprint": fingerprint,
+                "decision_reason": "opened by system",
+                "risk_note": "",
+            }
+        )
+
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(option_positions=[]),
+        executor=FakeManageExecutor(),
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    assert result == {
+        "status": "anomaly",
+        "reason": "missing_broker_position",
+        "fingerprints": [
+            "AMD|2026-04-30|P|160.0|155.0|1",
+            "NVDA|2026-05-15|C|125.0|130.0|1",
+        ],
+    }
+
+
 class _FakeOption:
     def __init__(
         self,
