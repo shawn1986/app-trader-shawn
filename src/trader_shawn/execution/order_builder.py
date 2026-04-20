@@ -13,11 +13,24 @@ def _option_right_for_strategy(strategy: str) -> str:
     raise ValueError(f"unsupported credit spread strategy: {strategy}")
 
 
+def _validate_strike_order(strategy: str, short_strike: float, long_strike: float) -> None:
+    normalized = strategy.lower()
+    if normalized == "bull_put_credit_spread" and short_strike <= long_strike:
+        raise ValueError("short_strike must be greater than long_strike")
+    if normalized == "bear_call_credit_spread" and short_strike >= long_strike:
+        raise ValueError("short_strike must be less than long_strike")
+
+
 def _validate_credit_spread_close(position: PositionSnapshot) -> None:
     if position.quantity <= 0:
         raise ValueError("quantity must be positive")
     if position.short_strike is None or position.long_strike is None:
         raise ValueError("credit spread combo order requires short and long strikes")
+    _validate_strike_order(
+        position.strategy,
+        position.short_strike,
+        position.long_strike,
+    )
     if not position.expiry:
         raise ValueError("credit spread combo order requires an expiry")
     if position.entry_credit is None or position.entry_credit <= 0:

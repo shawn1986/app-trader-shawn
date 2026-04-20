@@ -324,6 +324,46 @@ def test_build_credit_spread_combo_order_rejects_invalid_inputs(
         build_credit_spread_combo_order(position, limit_price=0.45)
 
 
+@pytest.mark.parametrize(
+    ("strategy", "short_strike", "long_strike", "message"),
+    [
+        (
+            "bull_put_credit_spread",
+            155,
+            160,
+            "short_strike must be greater than long_strike",
+        ),
+        (
+            "bear_call_credit_spread",
+            130,
+            125,
+            "short_strike must be less than long_strike",
+        ),
+    ],
+)
+def test_build_credit_spread_combo_order_rejects_swapped_strikes_by_strategy(
+    strategy: str,
+    short_strike: int,
+    long_strike: int,
+    message: str,
+) -> None:
+    position = PositionSnapshot(
+        ticker="AMD",
+        strategy=strategy,
+        expiry="2026-04-30",
+        short_strike=short_strike,
+        long_strike=long_strike,
+        entry_credit=1.00,
+        current_debit=0.45,
+        dte=9,
+        short_leg_distance_pct=0.08,
+        quantity=1,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        build_credit_spread_combo_order(position, limit_price=0.45)
+
+
 def test_ibkr_executor_submit_limit_combo_returns_stubbed_submission_record() -> None:
     position = PositionSnapshot(
         ticker="AMD",
