@@ -39,24 +39,27 @@ class OptionQuote:
 class CandidateSpread:
     ticker: str
     strategy: str
-    short_leg: OptionQuote
-    long_leg: OptionQuote
-    dte: int
-    credit: float
-    max_loss: float
-    width: float
-    expiry: str
-    short_delta: float
-    pop: float
-    bid_ask_ratio: float
+    short_leg: OptionQuote | None = None
+    long_leg: OptionQuote | None = None
+    dte: int = 0
+    credit: float = 0.0
+    max_loss: float = 0.0
+    width: float = 0.0
+    expiry: str = ""
+    short_delta: float = 0.0
+    pop: float = 0.0
+    bid_ask_ratio: float = 0.0
+    short_strike: float | None = None
+    long_strike: float | None = None
 
-    @property
-    def short_strike(self) -> float:
-        return self.short_leg.strike
+    def __post_init__(self) -> None:
+        if self.short_leg is not None:
+            self.short_strike = self.short_leg.strike
+        if self.long_leg is not None:
+            self.long_strike = self.long_leg.strike
 
-    @property
-    def long_strike(self) -> float:
-        return self.long_leg.strike
+        if self.short_strike is None or self.long_strike is None:
+            raise ValueError("candidate spread requires short and long strikes")
 
 
 @dataclass(slots=True)
@@ -83,12 +86,48 @@ class DecisionRecord:
 
 @dataclass(slots=True)
 class AccountSnapshot:
-    account_id: str
-    buying_power: float
-    net_liquidation: float
-    cash: float
-    excess_liquidity: float
+    account_id: str = ""
+    buying_power: float = 0.0
+    net_liquidation: float = 0.0
+    cash: float = 0.0
+    excess_liquidity: float = 0.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    open_risk: float = 0.0
+    new_positions_today: int = 0
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __init__(
+        self,
+        account_id: str = "",
+        buying_power: float = 0.0,
+        net_liquidation: float = 0.0,
+        cash: float = 0.0,
+        excess_liquidity: float = 0.0,
+        realized_pnl: float = 0.0,
+        unrealized_pnl: float = 0.0,
+        open_risk: float = 0.0,
+        new_positions_today: int = 0,
+        updated_at: datetime | None = None,
+        *,
+        net_liq: float | None = None,
+    ) -> None:
+        self.account_id = account_id
+        self.buying_power = buying_power
+        self.net_liquidation = (
+            net_liquidation if net_liq is None else net_liq
+        )
+        self.cash = cash
+        self.excess_liquidity = excess_liquidity
+        self.realized_pnl = realized_pnl
+        self.unrealized_pnl = unrealized_pnl
+        self.open_risk = open_risk
+        self.new_positions_today = new_positions_today
+        self.updated_at = updated_at or datetime.now(UTC)
+
+    @property
+    def net_liq(self) -> float:
+        return self.net_liquidation
 
 
 @dataclass(slots=True)
