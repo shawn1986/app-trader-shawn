@@ -13,7 +13,7 @@ def test_build_candidates_applies_task3_filters_and_builds_bull_put_spread() -> 
             expiry="2026-04-30",
             strike=160,
             right="P",
-            bid=1.40,
+            bid=1.45,
             ask=1.50,
             delta=-0.22,
             open_interest=500,
@@ -24,7 +24,7 @@ def test_build_candidates_applies_task3_filters_and_builds_bull_put_spread() -> 
             expiry="2026-04-30",
             strike=155,
             right="P",
-            bid=0.65,
+            bid=0.70,
             ask=0.75,
             delta=-0.18,
             open_interest=500,
@@ -91,7 +91,7 @@ def test_build_candidates_applies_task3_filters_and_builds_bull_put_spread() -> 
     assert round(candidate.max_loss, 2) == 4.25
     assert round(candidate.short_delta, 2) == 0.22
     assert round(candidate.pop, 2) == 0.78
-    assert round(candidate.bid_ask_ratio, 2) == 0.04
+    assert round(candidate.bid_ask_ratio, 2) == 0.13
 
 
 def test_build_candidates_allows_long_leg_outside_short_delta_band() -> None:
@@ -101,7 +101,7 @@ def test_build_candidates_allows_long_leg_outside_short_delta_band() -> None:
             expiry="2026-04-30",
             strike=160,
             right="P",
-            bid=1.40,
+            bid=1.45,
             ask=1.50,
             delta=-0.20,
             open_interest=500,
@@ -112,7 +112,7 @@ def test_build_candidates_allows_long_leg_outside_short_delta_band() -> None:
             expiry="2026-04-30",
             strike=155,
             right="P",
-            bid=0.65,
+            bid=0.70,
             ask=0.75,
             delta=-0.08,
             open_interest=10,
@@ -134,7 +134,7 @@ def test_build_candidates_accepts_boundary_short_delta_values() -> None:
             expiry="2026-04-30",
             strike=160,
             right="P",
-            bid=1.40,
+            bid=1.45,
             ask=1.50,
             delta=-0.25,
             open_interest=500,
@@ -145,7 +145,7 @@ def test_build_candidates_accepts_boundary_short_delta_values() -> None:
             expiry="2026-04-30",
             strike=155,
             right="P",
-            bid=0.65,
+            bid=0.70,
             ask=0.75,
             delta=-0.10,
             open_interest=10,
@@ -156,8 +156,8 @@ def test_build_candidates_accepts_boundary_short_delta_values() -> None:
             expiry="2026-04-30",
             strike=150,
             right="P",
-            bid=0.45,
-            ask=0.55,
+            bid=0.69,
+            ask=0.70,
             delta=-0.15,
             open_interest=500,
             volume=120,
@@ -167,8 +167,8 @@ def test_build_candidates_accepts_boundary_short_delta_values() -> None:
             expiry="2026-04-30",
             strike=145,
             right="P",
-            bid=0.20,
-            ask=0.30,
+            bid=0.45,
+            ask=0.46,
             delta=-0.05,
             open_interest=10,
             volume=1,
@@ -268,12 +268,53 @@ def test_build_candidates_rejects_bid_ask_ratio_above_threshold() -> None:
     assert build_candidates("AMD", 10, quotes) == []
 
 
+def test_build_candidates_rejects_low_credit_spread_with_wide_market() -> None:
+    quotes = [
+        OptionQuote(
+            symbol="AMD",
+            expiry="2026-04-30",
+            strike=160,
+            right="P",
+            bid=1.00,
+            ask=1.05,
+            delta=-0.20,
+            open_interest=500,
+            volume=120,
+        ),
+        OptionQuote(
+            symbol="AMD",
+            expiry="2026-04-30",
+            strike=155,
+            right="P",
+            bid=0.80,
+            ask=0.85,
+            delta=-0.10,
+            open_interest=10,
+            volume=1,
+        ),
+    ]
+
+    assert build_candidates("AMD", 10, quotes) == []
+
+
 def test_earnings_calendar_detects_blocking_event_in_window() -> None:
     calendar = EarningsCalendar(
         [
             {"ticker": "AMD", "date": date(2026, 4, 28)},
             {"ticker": "NVDA", "date": date(2026, 4, 28)},
             {"ticker": "AMD", "date": date(2026, 5, 10)},
+        ]
+    )
+
+    assert calendar.has_blocking_event("AMD", date(2026, 4, 25), date(2026, 4, 30)) is True
+    assert calendar.has_blocking_event("AMD", date(2026, 5, 1), date(2026, 5, 5)) is False
+
+
+def test_earnings_calendar_accepts_iso_date_strings() -> None:
+    calendar = EarningsCalendar(
+        [
+            {"ticker": "AMD", "date": "2026-04-28"},
+            {"ticker": "AMD", "date": "2026-05-10"},
         ]
     )
 

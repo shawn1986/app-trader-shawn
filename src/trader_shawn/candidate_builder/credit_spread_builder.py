@@ -46,7 +46,7 @@ def build_candidates(
             if credit <= 0:
                 continue
 
-            bid_ask_ratio = ((short_leg.ask - short_leg.bid) + (long_leg.ask - long_leg.bid)) / width
+            bid_ask_ratio = ((short_leg.ask - short_leg.bid) + (long_leg.ask - long_leg.bid)) / credit
             if bid_ask_ratio > MAX_BID_ASK_RATIO:
                 continue
             short_delta = abs(short_leg.delta)
