@@ -6,7 +6,11 @@ from importlib import import_module
 import math
 from typing import Any
 
-from trader_shawn.domain.models import AccountSnapshot, OptionQuote
+from trader_shawn.domain.models import (
+    AccountSnapshot,
+    BrokerOptionPosition,
+    OptionQuote,
+)
 
 
 class IbkrMarketDataClient:
@@ -137,6 +141,82 @@ class IbkrMarketDataClient:
             updated_at=datetime.now(UTC),
         )
 
+    def fetch_option_positions(self) -> list[BrokerOptionPosition]:
+        client = self.ensure_connected()
+        option_positions = [
+            position
+            for position in client.positions()
+            if _is_live_option_position(position)
+        ]
+        if not option_positions:
+            return []
+
+        snapshots = list(
+            client.reqTickers(
+                *[getattr(position, "contract") for position in option_positions]
+            )
+        )
+        return [
+            BrokerOptionPosition(
+                ticker=str(getattr(contract, "symbol", "")),
+                expiry=_normalize_expiry(
+                    str(getattr(contract, "lastTradeDateOrContractMonth", ""))
+                ),
+                right=str(getattr(contract, "right", "")),
+                quantity=int(float(getattr(position, "position", 0))),
+                short_strike=float(getattr(contract, "strike", 0.0)),
+                long_strike=None,
+                average_cost=_optional_float(getattr(position, "avgCost", None)),
+                market_price=_position_market_price(
+                    snapshot,
+                    quantity=float(getattr(position, "position", 0)),
+                ),
+                broker_position_id=_broker_position_id(contract),
+            )
+            for position, snapshot in zip(option_positions, snapshots, strict=True)
+            for contract in [getattr(position, "contract")]
+        ]
+
+    def estimate_spread_debit(
+        self,
+        *,
+        ticker: str,
+        expiry: str,
+        short_strike: float,
+        long_strike: float,
+        strategy: str,
+        exchange: str = "SMART",
+        currency: str = "USD",
+    ) -> float:
+        quotes = self._fetch_contract_quotes(
+            ticker=ticker,
+            contracts=[
+                self._resolve_ibkr_module().Option(
+                    symbol=ticker,
+                    lastTradeDateOrContractMonth=_ibkr_expiry(expiry),
+                    strike=short_strike,
+                    right=_option_right_for_strategy(strategy),
+                    exchange=exchange,
+                    currency=currency,
+                ),
+                self._resolve_ibkr_module().Option(
+                    symbol=ticker,
+                    lastTradeDateOrContractMonth=_ibkr_expiry(expiry),
+                    strike=long_strike,
+                    right=_option_right_for_strategy(strategy),
+                    exchange=exchange,
+                    currency=currency,
+                ),
+            ],
+        )
+        quotes_by_strike = {quote.strike: quote for quote in quotes}
+        try:
+            short_leg = quotes_by_strike[float(short_strike)]
+            long_leg = quotes_by_strike[float(long_strike)]
+        except KeyError as exc:
+            raise RuntimeError("IBKR returned incomplete spread leg quotes") from exc
+        return round(short_leg.ask - long_leg.bid, 2)
+
     def count_open_option_positions(self, *, symbol: str | None = None) -> int:
         count = 0
         for position in self.ensure_connected().positions():
@@ -203,6 +283,20 @@ class IbkrMarketDataClient:
             self._ibkr_module = import_module("ib_insync")
         return self._ibkr_module
 
+    def _fetch_contract_quotes(
+        self,
+        *,
+        ticker: str,
+        contracts: Iterable[Any],
+    ) -> list[OptionQuote]:
+        client = self.ensure_connected()
+        qualified_contracts = list(client.qualifyContracts(*list(contracts)))
+        snapshots = list(client.reqTickers(*qualified_contracts))
+        return self.normalize_option_quotes(
+            ticker,
+            [_ticker_to_quote_row(snapshot) for snapshot in snapshots],
+        )
+
 
 def _bounded_expiries(
     expirations: Iterable[str],
@@ -250,6 +344,15 @@ def _select_option_chain(chains: Iterable[Any], *, exchange: str) -> Any:
     return available[0]
 
 
+def _option_right_for_strategy(strategy: str) -> str:
+    normalized = strategy.lower()
+    if normalized == "bull_put_credit_spread":
+        return "P"
+    if normalized == "bear_call_credit_spread":
+        return "C"
+    raise ValueError(f"unsupported credit spread strategy: {strategy}")
+
+
 def _ticker_to_quote_row(snapshot: Any) -> dict[str, object]:
     contract = snapshot.contract
     right = str(contract.right).upper()
@@ -265,6 +368,33 @@ def _ticker_to_quote_row(snapshot: Any) -> dict[str, object]:
         "volume": _extract_option_metric(snapshot, right, "volume"),
         "open_interest": _extract_option_metric(snapshot, right, "open_interest"),
     }
+
+
+def _is_live_option_position(position: Any) -> bool:
+    contract = getattr(position, "contract", None)
+    if contract is None:
+        return False
+    if str(getattr(contract, "secType", "")).upper() not in {"OPT", "FOP"}:
+        return False
+    return float(getattr(position, "position", 0)) != 0
+
+
+def _position_market_price(snapshot: Any, *, quantity: float) -> float | None:
+    if quantity < 0:
+        return _optional_float(getattr(snapshot, "ask", None))
+    if quantity > 0:
+        return _optional_float(getattr(snapshot, "bid", None))
+    return _ticker_mark(snapshot)
+
+
+def _broker_position_id(contract: Any) -> str | None:
+    con_id = getattr(contract, "conId", None)
+    if con_id not in (None, "", 0):
+        return str(con_id)
+    local_symbol = getattr(contract, "localSymbol", None)
+    if local_symbol not in (None, ""):
+        return str(local_symbol)
+    return None
 
 
 def _extract_delta(snapshot: Any) -> float | None:

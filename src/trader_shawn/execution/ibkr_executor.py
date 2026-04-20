@@ -51,12 +51,14 @@ class IbkrExecutor:
         *,
         limit_price: float,
     ) -> dict[str, object]:
-        return self._submit_combo_order(
+        submission = self._submit_combo_order(
             build_credit_spread_combo_order(
                 position,
                 limit_price=limit_price,
             )
         )
+        submission["broker_fingerprint"] = self._broker_fingerprint(position)
+        return submission
 
     def _submit_combo_order(self, payload: dict[str, object]) -> dict[str, object]:
         client = self._ensure_connected()
@@ -174,6 +176,14 @@ class IbkrExecutor:
             self._ibkr_module = import_module("ib_insync")
         return self._ibkr_module
 
+    def _broker_fingerprint(self, position: PositionSnapshot) -> str:
+        right = _option_right_for_strategy(position.strategy)
+        return (
+            f"{position.ticker}|{position.expiry}|{right}|"
+            f"{float(position.short_strike)}|{float(position.long_strike)}|"
+            f"{int(position.quantity)}"
+        )
+
 
 def _extract_order_id(trade: Any, order: Any) -> int | None:
     for candidate in (getattr(order, "orderId", None), getattr(getattr(trade, "order", None), "orderId", None)):
@@ -193,3 +203,12 @@ def _extract_broker_status(trade: Any) -> str | None:
 
 def _ibkr_expiry(expiry: str) -> str:
     return expiry.replace("-", "")
+
+
+def _option_right_for_strategy(strategy: str) -> str:
+    normalized = strategy.lower()
+    if normalized == "bull_put_credit_spread":
+        return "P"
+    if normalized == "bear_call_credit_spread":
+        return "C"
+    raise ValueError(f"unsupported credit spread strategy: {strategy}")

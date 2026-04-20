@@ -643,6 +643,7 @@ def test_ibkr_executor_submit_limit_combo_returns_stubbed_submission_record() ->
             },
         ],
         "broker_status": "PendingSubmit",
+        "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
     }
 
 

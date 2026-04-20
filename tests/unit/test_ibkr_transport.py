@@ -4,7 +4,13 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
-from trader_shawn.domain.models import AccountSnapshot, CandidateSpread, OptionQuote
+from trader_shawn.domain.models import (
+    AccountSnapshot,
+    BrokerOptionPosition,
+    CandidateSpread,
+    OptionQuote,
+    PositionSnapshot,
+)
 from trader_shawn.execution.ibkr_executor import IbkrExecutor
 from trader_shawn.market_data.ibkr_market_data import (
     IbkrMarketDataClient,
@@ -128,12 +134,24 @@ class FakeMarketDataClient:
 
         tickers: list[object] = []
         for contract in contracts:
+            strike = float(getattr(contract, "strike", 0.0))
+            bid = 1.1
+            ask = 1.3
+            last = 1.2
+            if strike == 160.0:
+                bid = 1.25
+                ask = 1.35
+                last = 1.31
+            elif strike == 155.0:
+                bid = 0.72
+                ask = 0.84
+                last = 0.78
             tickers.append(
                 SimpleNamespace(
                     contract=contract,
-                    bid=1.1,
-                    ask=1.3,
-                    last=1.2,
+                    bid=bid,
+                    ask=ask,
+                    last=last,
                     close=1.15,
                     bidGreeks=SimpleNamespace(delta=-0.21),
                     modelGreeks=None,
@@ -185,12 +203,28 @@ class FakeMarketDataClient:
             SimpleNamespace(
                 account="DU123",
                 position=-1,
-                contract=SimpleNamespace(secType="OPT", symbol="AMD"),
+                avgCost=1.05,
+                contract=SimpleNamespace(
+                    secType="OPT",
+                    symbol="AMD",
+                    lastTradeDateOrContractMonth="20260430",
+                    strike=160.0,
+                    right="P",
+                    conId=80160,
+                ),
             ),
             SimpleNamespace(
                 account="DU123",
                 position=1,
-                contract=SimpleNamespace(secType="OPT", symbol="AMD"),
+                avgCost=0.33,
+                contract=SimpleNamespace(
+                    secType="OPT",
+                    symbol="AMD",
+                    lastTradeDateOrContractMonth="20260430",
+                    strike=155.0,
+                    right="P",
+                    conId=80155,
+                ),
             ),
             SimpleNamespace(
                 account="DU123",
@@ -410,6 +444,73 @@ def test_ibkr_market_data_client_maps_account_summary_and_counts_open_option_pos
     )
     assert snapshot.updated_at.tzinfo is UTC
     assert client.count_open_option_positions() == 1
+
+
+def test_ibkr_market_data_client_lists_live_option_positions_for_manage() -> None:
+    ib_client = FakeMarketDataClient()
+    client = IbkrMarketDataClient(client=ib_client, ibkr_module=FakeIbModule())
+
+    positions = client.fetch_option_positions()
+
+    assert positions == [
+        BrokerOptionPosition(
+            ticker="AMD",
+            expiry="2026-04-30",
+            right="P",
+            quantity=-1,
+            short_strike=160.0,
+            long_strike=None,
+            average_cost=1.05,
+            market_price=1.35,
+            broker_position_id="80160",
+        ),
+        BrokerOptionPosition(
+            ticker="AMD",
+            expiry="2026-04-30",
+            right="P",
+            quantity=1,
+            short_strike=155.0,
+            long_strike=None,
+            average_cost=0.33,
+            market_price=0.72,
+            broker_position_id="80155",
+        ),
+    ]
+
+
+def test_ibkr_market_data_client_estimates_spread_debit_from_live_legs() -> None:
+    ib_client = FakeMarketDataClient()
+    client = IbkrMarketDataClient(client=ib_client, ibkr_module=FakeIbModule())
+
+    debit = client.estimate_spread_debit(
+        ticker="AMD",
+        expiry="2026-04-30",
+        short_strike=160.0,
+        long_strike=155.0,
+        strategy="bull_put_credit_spread",
+    )
+
+    assert debit == 0.63
+
+
+def test_ibkr_executor_submit_limit_combo_returns_broker_fingerprint() -> None:
+    position = PositionSnapshot(
+        ticker="AMD",
+        strategy="bull_put_credit_spread",
+        expiry="2026-04-30",
+        short_strike=160,
+        long_strike=155,
+        entry_credit=1.00,
+        current_debit=0.63,
+        dte=9,
+        short_leg_distance_pct=0.08,
+        quantity=1,
+    )
+    executor = IbkrExecutor(client=FakeExecutionClient(), ibkr_module=FakeIbModule())
+
+    result = executor.submit_limit_combo(position, limit_price=0.63)
+
+    assert result["broker_fingerprint"] == "AMD|2026-04-30|P|160.0|155.0|1"
 
 
 def test_extract_delta_falls_back_to_model_greeks_when_bid_delta_missing() -> None:
