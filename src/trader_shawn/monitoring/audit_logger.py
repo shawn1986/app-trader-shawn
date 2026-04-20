@@ -92,13 +92,31 @@ class AuditLogger:
                     id integer primary key autoincrement,
                     position_id text not null,
                     event_type text not null,
-                    payload text not null,
+                    payload_json text not null,
                     created_at text not null,
                     foreign key (position_id) references managed_positions(position_id)
                 )
                 """
             )
+            self._migrate_position_events_payload_column(connection)
             connection.commit()
+
+    def _migrate_position_events_payload_column(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("pragma table_info(position_events)").fetchall()
+        }
+        if "payload_json" in columns or "payload" not in columns:
+            return
+        connection.execute(
+            """
+            alter table position_events
+            rename column payload to payload_json
+            """
+        )
 
     def _serialize_json(self, payload: Any, *, message: str) -> str:
         try:
@@ -227,7 +245,7 @@ class AuditLogger:
                 insert into position_events (
                     position_id,
                     event_type,
-                    payload,
+                    payload_json,
                     created_at
                 ) values (?, ?, ?, ?)
                 """,
@@ -243,7 +261,7 @@ class AuditLogger:
                     id,
                     position_id,
                     event_type,
-                    payload,
+                    payload_json,
                     created_at
                 from position_events
                 where position_id = ?
@@ -256,7 +274,7 @@ class AuditLogger:
                 "id": row["id"],
                 "position_id": row["position_id"],
                 "event_type": row["event_type"],
-                "payload": json.loads(row["payload"]),
+                "payload": json.loads(row["payload_json"]),
                 "created_at": row["created_at"],
             }
             for row in rows

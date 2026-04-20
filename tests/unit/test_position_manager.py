@@ -206,6 +206,54 @@ def test_audit_logger_closes_sqlite_connections(
     assert closed_connection_ids == opened_connection_ids
 
 
+def test_audit_logger_uses_payload_json_column_for_position_events(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "",
+        }
+    )
+    logger.record_position_event(
+        "pos-1",
+        "opened",
+        {"entry_order_id": 321},
+    )
+
+    with sqlite3.connect(tmp_path / "audit.db") as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("pragma table_info(position_events)").fetchall()
+        }
+        stored_payload = connection.execute(
+            "select payload_json from position_events where position_id = ?",
+            ("pos-1",),
+        ).fetchone()[0]
+
+    assert "payload_json" in columns
+    assert "payload" not in columns
+    assert stored_payload == '{"entry_order_id": 321}'
+    assert logger.fetch_position_events("pos-1")[0]["payload"] == {"entry_order_id": 321}
+
+
 def test_evaluate_exit_returns_take_profit_when_debit_reaches_half_credit() -> None:
     position = PositionSnapshot(
         ticker="AMD",
@@ -912,6 +960,79 @@ def test_manage_positions_returns_all_missing_fingerprints_when_broker_positions
             "NVDA|2026-05-15|C|125.0|130.0|1",
         ],
     }
+
+
+def test_manage_positions_updates_evaluated_position_when_no_exit_triggers(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "",
+        }
+    )
+    executor = FakeManageExecutor()
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+            ],
+            spread_debit=0.80,
+            spot_price=180.0,
+        ),
+        executor=executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    position = logger.fetch_active_managed_positions(mode="paper")[0]
+    assert result == {"status": "ok", "managed_count": 1}
+    assert executor.calls == []
+    assert position["status"] == "open"
+    assert position["last_known_debit"] == 0.80
+    assert position["last_evaluated_at"] is not None
+    assert logger.fetch_position_events("pos-1") == []
 
 
 class _FakeOption:

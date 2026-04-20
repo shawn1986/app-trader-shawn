@@ -52,14 +52,19 @@ class PositionManager:
                 earnings_calendar=self._earnings_calendar,
                 as_of=self._effective_as_of(),
             )
+            recorded_at = datetime.now(UTC)
             if exit_reason is None:
+                self._audit_logger.update_managed_position(
+                    managed_position["position_id"],
+                    last_known_debit=float(snapshot.current_debit),
+                    last_evaluated_at=recorded_at.isoformat(),
+                )
                 continue
 
             submission = self._executor.submit_limit_combo(
                 snapshot,
                 limit_price=float(snapshot.current_debit),
             )
-            recorded_at = datetime.now(UTC)
             self._audit_logger.update_managed_position(
                 managed_position["position_id"],
                 status="closing",
