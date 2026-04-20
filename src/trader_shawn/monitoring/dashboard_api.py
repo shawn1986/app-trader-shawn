@@ -20,14 +20,23 @@ def _snapshot_shape(
 
 
 def read_dashboard_snapshot(path: str | Path) -> dict[str, Any]:
+    snapshot_path = Path(path)
     try:
-        loaded = StateStore(Path(path)).load()
+        loaded = StateStore(snapshot_path).load()
     except StateStoreError as exc:
         return _snapshot_shape(
             status="error",
             error={
                 "type": type(exc).__name__,
                 "message": str(exc),
+            },
+        )
+    except OSError as exc:
+        return _snapshot_shape(
+            status="error",
+            error={
+                "type": "OSError",
+                "message": str(snapshot_path),
             },
         )
 
