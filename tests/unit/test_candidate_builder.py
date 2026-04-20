@@ -94,6 +94,110 @@ def test_build_candidates_applies_task3_filters_and_builds_bull_put_spread() -> 
     assert round(candidate.bid_ask_ratio, 2) == 0.13
 
 
+def test_build_candidates_generates_bull_put_and_bear_call_credit_spreads() -> None:
+    quotes = [
+        OptionQuote(
+            symbol="AMD",
+            expiry="2026-04-30",
+            strike=160,
+            right="P",
+            bid=1.45,
+            ask=1.50,
+            delta=-0.22,
+            open_interest=500,
+            volume=120,
+        ),
+        OptionQuote(
+            symbol="AMD",
+            expiry="2026-04-30",
+            strike=155,
+            right="P",
+            bid=0.70,
+            ask=0.75,
+            delta=-0.10,
+            open_interest=10,
+            volume=1,
+        ),
+        OptionQuote(
+            symbol="AMD",
+            expiry="2026-04-30",
+            strike=170,
+            right="C",
+            bid=1.10,
+            ask=1.15,
+            delta=0.21,
+            open_interest=500,
+            volume=100,
+        ),
+        OptionQuote(
+            symbol="AMD",
+            expiry="2026-04-30",
+            strike=175,
+            right="C",
+            bid=0.35,
+            ask=0.40,
+            delta=0.10,
+            open_interest=10,
+            volume=1,
+        ),
+    ]
+
+    candidates = build_candidates("AMD", 10, quotes)
+
+    assert len(candidates) == 2
+    candidates_by_strategy = {
+        candidate.strategy: candidate for candidate in candidates
+    }
+
+    bull_put = candidates_by_strategy["bull_put_credit_spread"]
+    assert bull_put.short_strike == 160
+    assert bull_put.long_strike == 155
+    assert round(bull_put.credit, 2) == 0.75
+
+    bear_call = candidates_by_strategy["bear_call_credit_spread"]
+    assert bear_call.short_strike == 170
+    assert bear_call.long_strike == 175
+    assert round(bear_call.credit, 2) == 0.75
+
+
+def test_build_candidates_blocks_entries_when_earnings_falls_before_expiry() -> None:
+    quotes = [
+        OptionQuote(
+            symbol="AMD",
+            expiry="2026-04-30",
+            strike=160,
+            right="P",
+            bid=1.45,
+            ask=1.50,
+            delta=-0.20,
+            open_interest=500,
+            volume=120,
+        ),
+        OptionQuote(
+            symbol="AMD",
+            expiry="2026-04-30",
+            strike=155,
+            right="P",
+            bid=0.70,
+            ask=0.75,
+            delta=-0.10,
+            open_interest=10,
+            volume=1,
+        ),
+    ]
+    calendar = EarningsCalendar([{"ticker": "AMD", "date": date(2026, 4, 28)}])
+
+    candidates = build_candidates(
+        "AMD",
+        10,
+        quotes,
+        earnings_calendar=calendar,
+        as_of=date(2026, 4, 20),
+    )
+
+    assert candidates == []
+
+
 def test_build_candidates_allows_long_leg_outside_short_delta_band() -> None:
     quotes = [
         OptionQuote(

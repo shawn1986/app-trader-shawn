@@ -1,9 +1,11 @@
 import pytest
 
 from trader_shawn.domain.models import PositionSnapshot
+from trader_shawn.events.earnings_calendar import EarningsCalendar
 from trader_shawn.execution.ibkr_executor import IbkrExecutor
 from trader_shawn.execution.order_builder import build_credit_spread_combo_order
 from trader_shawn.positions.manager import evaluate_exit
+from datetime import date
 
 
 def test_evaluate_exit_returns_take_profit_when_debit_reaches_half_credit() -> None:
@@ -100,6 +102,33 @@ def test_evaluate_exit_returns_short_strike_proximity_when_under_distance_thresh
             short_strike_distance_threshold_pct=0.02,
         )
         == "short_strike_proximity"
+    )
+
+
+def test_evaluate_exit_returns_event_risk_exit_when_earnings_is_before_expiry() -> None:
+    position = PositionSnapshot(
+        ticker="AMD",
+        strategy="bull_put_credit_spread",
+        expiry="2026-04-30",
+        short_strike=160,
+        long_strike=155,
+        entry_credit=1.00,
+        current_debit=0.80,
+        dte=9,
+        short_leg_distance_pct=0.08,
+    )
+    calendar = EarningsCalendar([{"ticker": "AMD", "date": date(2026, 4, 28)}])
+
+    assert (
+        evaluate_exit(
+            position,
+            profit_take_pct=0.50,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+            earnings_calendar=calendar,
+            as_of=date(2026, 4, 20),
+        )
+        == "event_risk_exit"
     )
 
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import date
+
 from trader_shawn.domain.models import PositionSnapshot
+from trader_shawn.events.earnings_calendar import EarningsCalendar
 
 
 def _require_exit_field(position: PositionSnapshot, field_name: str) -> float | int:
@@ -17,6 +20,8 @@ def evaluate_exit(
     stop_loss_multiple: float,
     exit_dte_threshold: int,
     short_strike_distance_threshold_pct: float = 0.02,
+    earnings_calendar: EarningsCalendar | None = None,
+    as_of: date | None = None,
 ) -> str | None:
     entry_credit = _require_exit_field(position, "entry_credit")
     current_debit = _require_exit_field(position, "current_debit")
@@ -31,6 +36,9 @@ def evaluate_exit(
     if current_debit >= entry_credit * stop_loss_multiple:
         return "stop_loss"
 
+    if _has_blocking_event(position, earnings_calendar=earnings_calendar, as_of=as_of):
+        return "event_risk_exit"
+
     if dte <= exit_dte_threshold:
         return "dte_exit"
 
@@ -41,3 +49,19 @@ def evaluate_exit(
         return "short_strike_proximity"
 
     return None
+
+
+def _has_blocking_event(
+    position: PositionSnapshot,
+    *,
+    earnings_calendar: EarningsCalendar | None,
+    as_of: date | None,
+) -> bool:
+    if earnings_calendar is None or not position.expiry:
+        return False
+    start = as_of or date.today()
+    return earnings_calendar.has_blocking_event(
+        position.ticker,
+        start,
+        date.fromisoformat(position.expiry),
+    )
