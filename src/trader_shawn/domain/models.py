@@ -125,6 +125,57 @@ class DecisionRecord:
 
 
 @dataclass(slots=True)
+class ManagedPositionRecord:
+    position_id: str
+    ticker: str
+    strategy: str
+    expiry: str
+    short_strike: float
+    long_strike: float
+    quantity: int
+    entry_credit: float
+    entry_order_id: int | None = None
+    mode: str = "paper"
+    status: str = "open"
+    opened_at: datetime | str = field(default_factory=lambda: datetime.now(UTC))
+    closed_at: datetime | str | None = None
+    last_known_debit: float | None = None
+    last_evaluated_at: datetime | str | None = None
+    broker_fingerprint: str = ""
+    decision_reason: str | None = None
+    risk_note: str | None = None
+
+    def to_row(self) -> dict[str, Any]:
+        row = {
+            item.name: _json_safe_payload(getattr(self, item.name), path=item.name)
+            for item in fields(self)
+        }
+        return row
+
+
+@dataclass(slots=True)
+class BrokerOptionPosition:
+    ticker: str
+    expiry: str
+    right: str
+    quantity: int = 1
+    short_strike: float | None = None
+    long_strike: float | None = None
+    average_cost: float | None = None
+    market_price: float | None = None
+    broker_position_id: str | None = None
+
+    def __post_init__(self) -> None:
+        self.right = self.right.upper()
+        if self.right not in {"C", "P"}:
+            try:
+                option_right = OptionRight(self.right.lower())
+            except ValueError as exc:
+                raise ValueError(f"invalid option right: {self.right}") from exc
+            self.right = "C" if option_right is OptionRight.CALL else "P"
+
+
+@dataclass(slots=True)
 class AccountSnapshot:
     account_id: str = ""
     buying_power: float = 0.0

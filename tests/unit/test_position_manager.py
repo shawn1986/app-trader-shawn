@@ -1,11 +1,80 @@
+from pathlib import Path
+
 import pytest
 
 from trader_shawn.domain.models import PositionSnapshot
 from trader_shawn.events.earnings_calendar import EarningsCalendar
+from trader_shawn.monitoring.audit_logger import AuditLogger
 from trader_shawn.execution.ibkr_executor import IbkrExecutor
 from trader_shawn.execution.order_builder import build_credit_spread_combo_order
 from trader_shawn.positions.manager import evaluate_exit
 from datetime import date
+
+
+def test_audit_logger_persists_and_updates_managed_position(tmp_path: Path) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "initial",
+        }
+    )
+    logger.record_position_event(
+        "pos-1",
+        "opened",
+        {"entry_order_id": 321},
+    )
+    logger.update_managed_position(
+        "pos-1",
+        status="closing",
+        last_known_debit=0.52,
+        last_evaluated_at="2026-04-20T10:00:00+00:00",
+    )
+
+    positions = logger.fetch_active_managed_positions(mode="paper")
+    events = logger.fetch_position_events("pos-1")
+
+    assert positions == [
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "closing",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": 0.52,
+            "last_evaluated_at": "2026-04-20T10:00:00+00:00",
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "initial",
+        }
+    ]
+    assert events[0]["event_type"] == "opened"
+    assert events[0]["payload"] == {"entry_order_id": 321}
 
 
 def test_evaluate_exit_returns_take_profit_when_debit_reaches_half_credit() -> None:
