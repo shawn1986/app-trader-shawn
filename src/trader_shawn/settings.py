@@ -33,6 +33,14 @@ class ProviderSettings(BaseModel):
     secondary_timeout_seconds: int
 
 
+class SymbolsSettings(BaseModel):
+    symbols: list[str]
+
+
+class EventsSettings(BaseModel):
+    events: list[dict[str, Any]]
+
+
 class AppSettings(BaseModel):
     mode: str
     live_enabled: bool
@@ -52,7 +60,32 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def _parse_bool_env(name: str, fallback: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return fallback
+
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a valid boolean string")
+
+
+def _parse_int_env(name: str, fallback: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return fallback
+
+    try:
+        return int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a valid integer") from exc
+
+
 def load_settings(config_dir: Path) -> AppSettings:
+    config_dir = config_dir.resolve()
     app_data = _load_yaml(config_dir / "app.yaml")
     symbols_data = _load_yaml(config_dir / "symbols.yaml")
     risk_data = _load_yaml(config_dir / "risk.yaml")
@@ -60,25 +93,28 @@ def load_settings(config_dir: Path) -> AppSettings:
     events_data = _load_yaml(config_dir / "events.yaml")
 
     app_data["mode"] = os.getenv("TRADER_SHAWN_MODE", app_data["mode"])
-    app_data["live_enabled"] = os.getenv(
-        "TRADER_SHAWN_LIVE_ENABLED", str(app_data["live_enabled"])
-    ).lower() in {"1", "true", "yes", "on"}
+    app_data["live_enabled"] = _parse_bool_env(
+        "TRADER_SHAWN_LIVE_ENABLED", app_data["live_enabled"]
+    )
 
     ibkr_data = dict(app_data["ibkr"])
     ibkr_data["host"] = os.getenv("TRADER_SHAWN_IBKR_HOST", ibkr_data["host"])
-    ibkr_data["port"] = int(os.getenv("TRADER_SHAWN_IBKR_PORT", str(ibkr_data["port"])))
-    ibkr_data["client_id"] = int(
-        os.getenv("TRADER_SHAWN_IBKR_CLIENT_ID", str(ibkr_data["client_id"]))
+    ibkr_data["port"] = _parse_int_env("TRADER_SHAWN_IBKR_PORT", ibkr_data["port"])
+    ibkr_data["client_id"] = _parse_int_env(
+        "TRADER_SHAWN_IBKR_CLIENT_ID", ibkr_data["client_id"]
     )
     app_data["ibkr"] = ibkr_data
 
-    return AppSettings(
-        mode=app_data["mode"],
-        live_enabled=app_data["live_enabled"],
-        ibkr=IBKRSettings.model_validate(app_data["ibkr"]),
-        audit_db_path=Path(app_data["audit_db_path"]),
-        symbols=list(symbols_data["symbols"]),
-        risk=RiskSettings.model_validate(risk_data),
-        providers=ProviderSettings.model_validate(providers_data),
-        events=list(events_data.get("events", [])),
-    )
+    audit_db_path = Path(app_data["audit_db_path"])
+    if not audit_db_path.is_absolute():
+        audit_db_path = (config_dir.parent / audit_db_path).resolve()
+
+    merged_data = {
+        **app_data,
+        "audit_db_path": audit_db_path,
+        "symbols": SymbolsSettings.model_validate(symbols_data).symbols,
+        "risk": risk_data,
+        "providers": providers_data,
+        "events": EventsSettings.model_validate(events_data).events,
+    }
+    return AppSettings.model_validate(merged_data)
