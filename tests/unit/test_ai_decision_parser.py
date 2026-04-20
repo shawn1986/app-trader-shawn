@@ -71,3 +71,17 @@ def test_parse_decision_rejects_invalid_approval_invariants(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         parse_decision(_approval_payload(**overrides))
+
+
+def test_parse_decision_accepts_bear_call_credit_spread_with_ascending_strikes() -> None:
+    decision = parse_decision(
+        _approval_payload(
+            strategy="bear_call_credit_spread",
+            short_strike=125.0,
+            long_strike=130.0,
+        )
+    )
+
+    assert decision.strategy == "bear_call_credit_spread"
+    assert decision.short_strike == 125.0
+    assert decision.long_strike == 130.0

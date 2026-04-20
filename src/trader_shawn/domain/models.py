@@ -182,9 +182,9 @@ class PositionSnapshot:
     expiry: str = ""
     short_strike: float | None = None
     long_strike: float | None = None
-    entry_credit: float = 0.0
-    current_debit: float = 0.0
-    dte: int = 0
+    entry_credit: float | None = None
+    current_debit: float | None = None
+    dte: int | None = None
     short_leg_distance_pct: float | None = None
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 

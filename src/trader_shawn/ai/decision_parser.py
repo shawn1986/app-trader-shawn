@@ -63,6 +63,7 @@ def _require_finite_approval_number(value: float, field_name: str) -> float:
 
 
 def _validate_approval_fields(
+    strategy: str,
     short_strike: float,
     long_strike: float,
     limit_credit: float,
@@ -73,8 +74,11 @@ def _validate_approval_fields(
     limit_credit = _require_finite_approval_number(limit_credit, "limit_credit")
     confidence = _require_finite_approval_number(confidence, "confidence")
 
-    if short_strike <= long_strike:
+    normalized_strategy = strategy.lower()
+    if normalized_strategy == "bull_put_credit_spread" and short_strike <= long_strike:
         raise ValueError("invalid approval field: short_strike must be greater than long_strike")
+    if normalized_strategy == "bear_call_credit_spread" and short_strike >= long_strike:
+        raise ValueError("invalid approval field: short_strike must be less than long_strike")
     if limit_credit <= 0:
         raise ValueError("invalid approval field: limit_credit must be greater than 0")
     if not 0 <= confidence <= 1:
@@ -97,16 +101,23 @@ def parse_decision(payload: dict[str, Any]) -> ParsedDecision:
             if field_name not in payload:
                 raise ValueError(f"missing or invalid field: {field_name}")
 
+        strategy = _require_str(payload, "strategy")
         short_strike = _require_number(payload, "short_strike")
         long_strike = _require_number(payload, "long_strike")
         limit_credit = _require_number(payload, "limit_credit")
         confidence = _require_number(payload, "confidence")
-        _validate_approval_fields(short_strike, long_strike, limit_credit, confidence)
+        _validate_approval_fields(
+            strategy,
+            short_strike,
+            long_strike,
+            limit_credit,
+            confidence,
+        )
 
         return ParsedDecision(
             action=action,
             ticker=_require_str(payload, "ticker"),
-            strategy=_require_str(payload, "strategy"),
+            strategy=strategy,
             expiry=_require_str(payload, "expiry"),
             short_strike=short_strike,
             long_strike=long_strike,
