@@ -47,11 +47,9 @@ class IbkrExecutor:
                 limit_credit=limit_credit,
                 quantity=quantity,
             )
-            return self._submit_combo_order(payload)
-        except OrderNotSubmittedError:
-            raise
         except Exception as exc:
             raise OrderNotSubmittedError(str(exc)) from exc
+        return self._submit_combo_order(payload)
 
     def submit_limit_combo(
         self,
@@ -64,11 +62,9 @@ class IbkrExecutor:
                 position,
                 limit_price=limit_price,
             )
-            submission = self._submit_combo_order(payload)
-        except OrderNotSubmittedError:
-            raise
         except Exception as exc:
             raise OrderNotSubmittedError(str(exc)) from exc
+        submission = self._submit_combo_order(payload)
         submission["broker_fingerprint"] = self._broker_fingerprint(position)
         return submission
 

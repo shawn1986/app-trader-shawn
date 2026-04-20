@@ -44,32 +44,6 @@ class PositionManager:
 
         matched_positions = list(reconciliation["matched_positions"])
         closing_to_close = list(reconciliation["closing_to_close"])
-        for managed_position in closing_to_close:
-            recorded_at = datetime.now(UTC)
-            self._audit_logger.update_managed_position(
-                managed_position["position_id"],
-                status="closed",
-                closed_at=recorded_at.isoformat(),
-                last_evaluated_at=recorded_at.isoformat(),
-            )
-            self._audit_logger.record_position_event(
-                managed_position["position_id"],
-                "closed",
-                {
-                    "reason": "broker_position_missing",
-                    "broker_fingerprint": managed_position["broker_fingerprint"],
-                },
-                created_at=recorded_at,
-            )
-
-        uncertain_fingerprints = self._uncertain_submit_fingerprints(matched_positions)
-        if uncertain_fingerprints:
-            return {
-                "status": "anomaly",
-                "reason": "uncertain_submit_state",
-                "fingerprints": uncertain_fingerprints,
-                "manual_intervention_required": True,
-            }
         staged_evaluations: list[dict[str, Any]] = []
         for managed_position in matched_positions:
             snapshot = self._build_snapshot(managed_position)
@@ -89,6 +63,16 @@ class PositionManager:
                     "recorded_at": datetime.now(UTC),
                 }
             )
+
+        uncertain_fingerprints = self._uncertain_submit_fingerprints(matched_positions)
+        if uncertain_fingerprints:
+            self._finalize_missing_closing_positions(closing_to_close)
+            return {
+                "status": "anomaly",
+                "reason": "uncertain_submit_state",
+                "fingerprints": uncertain_fingerprints,
+                "manual_intervention_required": True,
+            }
 
         submission_target = next(
             (
@@ -113,6 +97,8 @@ class PositionManager:
                 managed_position["position_id"],
                 **updates,
             )
+
+        self._finalize_missing_closing_positions(closing_to_close)
 
         if submission_target is not None:
             managed_position = submission_target["managed_position"]
@@ -184,6 +170,28 @@ class PositionManager:
             "status": "ok",
             "managed_count": len(managed_positions),
         }
+
+    def _finalize_missing_closing_positions(
+        self,
+        managed_positions: list[dict[str, Any]],
+    ) -> None:
+        for managed_position in managed_positions:
+            recorded_at = datetime.now(UTC)
+            self._audit_logger.update_managed_position(
+                managed_position["position_id"],
+                status="closed",
+                closed_at=recorded_at.isoformat(),
+                last_evaluated_at=recorded_at.isoformat(),
+            )
+            self._audit_logger.record_position_event(
+                managed_position["position_id"],
+                "closed",
+                {
+                    "reason": "broker_position_missing",
+                    "broker_fingerprint": managed_position["broker_fingerprint"],
+                },
+                created_at=recorded_at,
+            )
 
     def _uncertain_submit_fingerprints(
         self,
