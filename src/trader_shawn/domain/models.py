@@ -1,10 +1,46 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import UTC, date, datetime
+from enum import Enum
 from typing import Any
 
 from trader_shawn.domain.enums import DecisionAction, OptionRight, PositionSide
+
+
+def _json_safe_payload(value: Any, *, path: str = "payload") -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value):
+        return {
+            item.name: _json_safe_payload(
+                getattr(value, item.name),
+                path=f"{path}.{item.name}",
+            )
+            for item in fields(value)
+        }
+    if isinstance(value, dict):
+        serialized: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(
+                    f"unsupported decision payload key at {path}: {key!r}"
+                )
+            serialized[key] = _json_safe_payload(item, path=f"{path}.{key}")
+        return serialized
+    if isinstance(value, list | tuple):
+        return [
+            _json_safe_payload(item, path=f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    raise TypeError(
+        f"unsupported decision payload value at {path}: "
+        f"{type(value).__name__}"
+    )
 
 
 @dataclass(slots=True)
@@ -78,10 +114,14 @@ class DecisionRecord:
             raise ValueError(f"invalid decision action: {self.action}") from exc
 
     def to_row(self) -> dict[str, Any]:
-        row = asdict(self)
-        row["action"] = self.action.value
-        row["created_at"] = self.created_at.isoformat()
-        return row
+        return {
+            "cycle_id": self.cycle_id,
+            "provider": self.provider,
+            "action": self.action.value,
+            "ticker": self.ticker,
+            "payload": _json_safe_payload(self.payload),
+            "created_at": self.created_at.isoformat(),
+        }
 
 
 @dataclass(slots=True)
@@ -139,3 +179,9 @@ class PositionSnapshot:
     unrealized_pnl: float
     side: PositionSide
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        try:
+            self.side = PositionSide(self.side)
+        except ValueError as exc:
+            raise ValueError(f"invalid position side: {self.side}") from exc

@@ -16,14 +16,16 @@ class RiskGuard:
         open_symbol_count: int,
     ) -> GuardResult:
         daily_pnl = account.realized_pnl + account.unrealized_pnl
+        daily_loss_limit_base = account.net_liq - min(daily_pnl, 0)
+        projected_open_risk = account.open_risk + spread.max_loss
 
         if spread.max_loss > account.net_liq * self._risk_settings.max_risk_per_trade_pct:
             return GuardResult(allowed=False, reason="max_risk_per_trade_pct")
-        if daily_pnl < 0 and (-daily_pnl) > account.net_liq * self._risk_settings.max_daily_loss_pct:
+        if daily_pnl < 0 and (-daily_pnl) > daily_loss_limit_base * self._risk_settings.max_daily_loss_pct:
             return GuardResult(allowed=False, reason="max_daily_loss_pct")
         if account.new_positions_today >= self._risk_settings.max_new_positions_per_day:
             return GuardResult(allowed=False, reason="max_new_positions_per_day")
-        if account.open_risk > account.net_liq * self._risk_settings.max_open_risk_pct:
+        if projected_open_risk > account.net_liq * self._risk_settings.max_open_risk_pct:
             return GuardResult(allowed=False, reason="max_open_risk_pct")
         if open_symbol_count >= self._risk_settings.max_spreads_per_symbol:
             return GuardResult(allowed=False, reason="max_spreads_per_symbol")

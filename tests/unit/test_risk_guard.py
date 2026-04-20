@@ -73,17 +73,27 @@ def test_risk_guard_allows_trade_when_all_limits_are_within_thresholds() -> None
 
 
 @pytest.mark.parametrize(
-    ("max_loss", "realized_pnl", "unrealized_pnl", "open_risk", "new_positions_today", "open_symbol_count", "expected_reason"),
+    (
+        "max_loss",
+        "net_liq",
+        "realized_pnl",
+        "unrealized_pnl",
+        "open_risk",
+        "new_positions_today",
+        "open_symbol_count",
+        "expected_reason",
+    ),
     [
-        (201, 0, 0, 500, 0, 0, "max_risk_per_trade_pct"),
-        (150, -401, 0, 500, 0, 0, "max_daily_loss_pct"),
-        (150, 0, 0, 500, 6, 0, "max_new_positions_per_day"),
-        (150, 0, 0, 2001, 0, 0, "max_open_risk_pct"),
-        (150, 0, 0, 500, 0, 2, "max_spreads_per_symbol"),
+        (201, 10_000, 0, 0, 500, 0, 0, "max_risk_per_trade_pct"),
+        (150, 9_600, -401, 0, 500, 0, 0, "max_daily_loss_pct"),
+        (150, 10_000, 0, 0, 500, 6, 0, "max_new_positions_per_day"),
+        (150, 10_000, 0, 0, 1_851, 0, 0, "max_open_risk_pct"),
+        (150, 10_000, 0, 0, 500, 0, 2, "max_spreads_per_symbol"),
     ],
 )
 def test_risk_guard_rejects_each_rule(
     max_loss: float,
+    net_liq: float,
     realized_pnl: float,
     unrealized_pnl: float,
     open_risk: float,
@@ -94,6 +104,7 @@ def test_risk_guard_rejects_each_rule(
     result = _guard().evaluate(
         _spread(max_loss=max_loss),
         _account(
+            net_liq=net_liq,
             realized_pnl=realized_pnl,
             unrealized_pnl=unrealized_pnl,
             open_risk=open_risk,
@@ -107,17 +118,26 @@ def test_risk_guard_rejects_each_rule(
 
 
 @pytest.mark.parametrize(
-    ("max_loss", "realized_pnl", "unrealized_pnl", "open_risk", "new_positions_today", "open_symbol_count"),
+    (
+        "max_loss",
+        "net_liq",
+        "realized_pnl",
+        "unrealized_pnl",
+        "open_risk",
+        "new_positions_today",
+        "open_symbol_count",
+    ),
     [
-        (200, 0, 0, 500, 0, 0),
-        (150, -400, 0, 500, 0, 0),
-        (150, 0, 0, 500, 5, 0),
-        (150, 0, 0, 2000, 0, 0),
-        (150, 0, 0, 500, 0, 1),
+        (200, 10_000, 0, 0, 500, 0, 0),
+        (150, 9_600, -400, 0, 500, 0, 0),
+        (150, 10_000, 0, 0, 500, 5, 0),
+        (150, 10_000, 0, 0, 1_850, 0, 0),
+        (150, 10_000, 0, 0, 500, 0, 1),
     ],
 )
 def test_risk_guard_allows_when_value_equals_threshold(
     max_loss: float,
+    net_liq: float,
     realized_pnl: float,
     unrealized_pnl: float,
     open_risk: float,
@@ -127,6 +147,7 @@ def test_risk_guard_allows_when_value_equals_threshold(
     result = _guard().evaluate(
         _spread(max_loss=max_loss),
         _account(
+            net_liq=net_liq,
             realized_pnl=realized_pnl,
             unrealized_pnl=unrealized_pnl,
             open_risk=open_risk,
@@ -150,6 +171,17 @@ def test_risk_guard_ignores_large_gains_for_daily_loss_limit() -> None:
     assert result.reason == "ok"
 
 
+def test_risk_guard_uses_pre_loss_equity_for_daily_loss_limit() -> None:
+    result = _guard().evaluate(
+        _spread(),
+        _account(net_liq=9_610, realized_pnl=-390, unrealized_pnl=0),
+        open_symbol_count=0,
+    )
+
+    assert result.allowed is True
+    assert result.reason == "ok"
+
+
 def test_risk_guard_returns_first_matching_rejection_reason() -> None:
     result = _guard().evaluate(
         _spread(max_loss=500),
@@ -159,6 +191,28 @@ def test_risk_guard_returns_first_matching_rejection_reason() -> None:
 
     assert result.allowed is False
     assert result.reason == "max_risk_per_trade_pct"
+
+
+def test_risk_guard_rejects_when_candidate_trade_pushes_open_risk_over_limit() -> None:
+    result = _guard().evaluate(
+        _spread(max_loss=101),
+        _account(open_risk=1_900),
+        open_symbol_count=0,
+    )
+
+    assert result.allowed is False
+    assert result.reason == "max_open_risk_pct"
+
+
+def test_risk_guard_allows_when_candidate_trade_brings_open_risk_to_limit() -> None:
+    result = _guard().evaluate(
+        _spread(max_loss=100),
+        _account(open_risk=1_900),
+        open_symbol_count=0,
+    )
+
+    assert result.allowed is True
+    assert result.reason == "ok"
 
 
 def test_account_snapshot_accepts_net_liq_alias() -> None:

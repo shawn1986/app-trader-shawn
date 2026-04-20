@@ -32,6 +32,10 @@ class AuditLogger:
 
     def record_decision(self, record: DecisionRecord) -> None:
         row = record.to_row()
+        try:
+            payload = json.dumps(row["payload"], sort_keys=True)
+        except TypeError as exc:
+            raise TypeError("unsupported decision payload") from exc
         with sqlite3.connect(self._db_path) as connection:
             connection.execute(
                 """
@@ -49,7 +53,7 @@ class AuditLogger:
                     row["provider"],
                     row["action"],
                     row["ticker"],
-                    json.dumps(row["payload"], sort_keys=True),
+                    payload,
                     row["created_at"],
                 ),
             )

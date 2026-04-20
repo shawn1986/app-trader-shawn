@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any
 
 
+class StateStoreError(ValueError):
+    """Raised when persisted monitor state cannot be loaded safely."""
+
+
 class StateStore:
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
@@ -14,10 +18,12 @@ class StateStore:
             return {}
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
+        except json.JSONDecodeError as exc:
+            raise StateStoreError(f"invalid state file: {self._path}") from exc
         if not isinstance(data, dict):
-            return {}
+            raise StateStoreError(
+                f"state file must contain a JSON object: {self._path}"
+            )
         return data
 
     def save(self, state: dict[str, Any]) -> None:
