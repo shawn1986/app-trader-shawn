@@ -9,6 +9,7 @@ description = "Bootstrap for Trader Shawn settings and configuration."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "click>=8.1,<9",
     "pydantic>=2.7,<3",
     "pyyaml>=6.0.1,<7",
 ]
