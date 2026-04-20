@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from typing import Any, Sequence
 
 from trader_shawn.domain.enums import DecisionAction, PositionSide
@@ -27,8 +28,23 @@ def run_trade_cycle(
         "candidates": list(candidates),
         "account": account,
     }
-    decision = decision_service.decide(context)
-    action = DecisionAction(getattr(decision, "action"))
+    try:
+        decision = decision_service.decide(context)
+    except Exception as exc:
+        return _error_result(
+            status="decision_error",
+            reason="decision_service_failed",
+            exc=exc,
+        )
+
+    try:
+        action = DecisionAction(getattr(decision, "action"))
+    except (AttributeError, TypeError, ValueError):
+        return {
+            "status": "decision_error",
+            "reason": "invalid_action",
+            "action": getattr(decision, "action", None),
+        }
     if action is not DecisionAction.APPROVE:
         return {
             "status": "decision_rejected",
@@ -36,28 +52,68 @@ def run_trade_cycle(
             "action": action.value,
         }
 
+    matched_spread = _resolve_approved_candidate(candidates, decision)
+    if matched_spread is None:
+        return {
+            "status": "decision_rejected",
+            "reason": "approved_candidate_not_found",
+        }
+
     if risk_guard is not None:
-        guard_result = risk_guard.evaluate(selected, account, open_symbol_count)
+        guard_result = risk_guard.evaluate(
+            matched_spread,
+            account,
+            open_symbol_count,
+        )
         if not guard_result.allowed:
             return {"status": "risk_rejected", "reason": guard_result.reason}
 
+    try:
+        limit_credit = _decision_limit_credit(decision)
+    except (AttributeError, TypeError, ValueError) as exc:
+        return _error_result(
+            status="decision_error",
+            reason="invalid_approval",
+            exc=exc,
+        )
+
     position = PositionSnapshot(
-        ticker=getattr(decision, "ticker", selected.ticker) or selected.ticker,
+        ticker=matched_spread.ticker,
         quantity=1,
         side=PositionSide.SHORT,
-        strategy=getattr(decision, "strategy", selected.strategy) or selected.strategy,
-        expiry=getattr(decision, "expiry", selected.expiry) or selected.expiry,
-        short_strike=getattr(decision, "short_strike", selected.short_strike),
-        long_strike=getattr(decision, "long_strike", selected.long_strike),
-        entry_credit=getattr(decision, "limit_credit", selected.credit),
+        strategy=matched_spread.strategy,
+        expiry=matched_spread.expiry,
+        short_strike=matched_spread.short_strike,
+        long_strike=matched_spread.long_strike,
+        entry_credit=matched_spread.credit,
     )
-    return executor.submit_limit_combo(
-        position,
-        limit_price=getattr(decision, "limit_credit", selected.credit),
-    )
+    try:
+        return executor.submit_limit_combo(
+            position,
+            limit_price=limit_credit,
+        )
+    except Exception as exc:
+        return _error_result(
+            status="executor_error",
+            reason="submission_failed",
+            exc=exc,
+        )
 
 
-def build_parser() -> argparse.ArgumentParser:
+def cli(argv: Sequence[str] | None = None) -> int:
+    parser = _build_cli_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    result = args.handler(args)
+    if result is not None:
+        print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    return cli(argv)
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="trader-shawn")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -70,13 +126,50 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
-    result = args.handler(args)
-    if result is not None:
-        print(json.dumps(result, sort_keys=True))
-    return 0
+def _resolve_approved_candidate(
+    candidates: Sequence[CandidateSpread],
+    decision: Any,
+) -> CandidateSpread | None:
+    try:
+        ticker = str(getattr(decision, "ticker"))
+        expiry = str(getattr(decision, "expiry"))
+        short_strike = float(getattr(decision, "short_strike"))
+        long_strike = float(getattr(decision, "long_strike"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+    for candidate in candidates:
+        if (
+            candidate.ticker == ticker
+            and candidate.expiry == expiry
+            and _strikes_match(candidate.short_strike, short_strike)
+            and _strikes_match(candidate.long_strike, long_strike)
+        ):
+            return candidate
+    return None
+
+
+def _decision_limit_credit(decision: Any) -> float:
+    limit_credit = float(getattr(decision, "limit_credit"))
+    if not math.isfinite(limit_credit) or limit_credit <= 0:
+        raise ValueError("limit_credit must be a positive finite number")
+    return limit_credit
+
+
+def _strikes_match(candidate_strike: float | None, approved_strike: float) -> bool:
+    return (
+        candidate_strike is not None
+        and math.isclose(float(candidate_strike), approved_strike, rel_tol=0.0, abs_tol=1e-9)
+    )
+
+
+def _error_result(*, status: str, reason: str, exc: Exception) -> dict[str, str]:
+    return {
+        "status": status,
+        "reason": reason,
+        "error_type": type(exc).__name__,
+        "message": str(exc),
+    }
 
 
 def _trade_cycle_command(_: argparse.Namespace) -> dict[str, str]:
