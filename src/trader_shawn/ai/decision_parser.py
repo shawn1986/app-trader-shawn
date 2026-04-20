@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any
 
 from trader_shawn.domain.enums import DecisionAction
@@ -55,6 +56,31 @@ def _optional_number(payload: dict[str, Any], field_name: str) -> float | None:
     return _require_number(payload, field_name)
 
 
+def _require_finite_approval_number(value: float, field_name: str) -> float:
+    if not math.isfinite(value):
+        raise ValueError(f"invalid approval field: {field_name} must be finite")
+    return value
+
+
+def _validate_approval_fields(
+    short_strike: float,
+    long_strike: float,
+    limit_credit: float,
+    confidence: float,
+) -> None:
+    short_strike = _require_finite_approval_number(short_strike, "short_strike")
+    long_strike = _require_finite_approval_number(long_strike, "long_strike")
+    limit_credit = _require_finite_approval_number(limit_credit, "limit_credit")
+    confidence = _require_finite_approval_number(confidence, "confidence")
+
+    if short_strike <= long_strike:
+        raise ValueError("invalid approval field: short_strike must be greater than long_strike")
+    if limit_credit <= 0:
+        raise ValueError("invalid approval field: limit_credit must be greater than 0")
+    if not 0 <= confidence <= 1:
+        raise ValueError("invalid approval field: confidence must be between 0 and 1")
+
+
 def parse_decision(payload: dict[str, Any]) -> ParsedDecision:
     if not isinstance(payload, dict):
         raise ValueError("decision payload must be a dictionary")
@@ -71,15 +97,21 @@ def parse_decision(payload: dict[str, Any]) -> ParsedDecision:
             if field_name not in payload:
                 raise ValueError(f"missing or invalid field: {field_name}")
 
+        short_strike = _require_number(payload, "short_strike")
+        long_strike = _require_number(payload, "long_strike")
+        limit_credit = _require_number(payload, "limit_credit")
+        confidence = _require_number(payload, "confidence")
+        _validate_approval_fields(short_strike, long_strike, limit_credit, confidence)
+
         return ParsedDecision(
             action=action,
             ticker=_require_str(payload, "ticker"),
             strategy=_require_str(payload, "strategy"),
             expiry=_require_str(payload, "expiry"),
-            short_strike=_require_number(payload, "short_strike"),
-            long_strike=_require_number(payload, "long_strike"),
-            limit_credit=_require_number(payload, "limit_credit"),
-            confidence=_require_number(payload, "confidence"),
+            short_strike=short_strike,
+            long_strike=long_strike,
+            limit_credit=limit_credit,
+            confidence=confidence,
             reason=_require_str(payload, "reason"),
             risk_note=_require_str(payload, "risk_note"),
             raw_payload=dict(payload),

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
+from datetime import date, datetime, time
+from enum import Enum
 import json
 from subprocess import SubprocessError
 from typing import Any
@@ -14,7 +17,7 @@ class AiDecisionService:
         self._secondary = secondary
 
     def decide(self, context: dict[str, Any]) -> ParsedDecision:
-        prompt = json.dumps(context, sort_keys=True)
+        prompt = json.dumps(context, sort_keys=True, default=_json_default)
         decision = parse_decision(self._primary.request(prompt))
 
         if self._secondary is None:
@@ -46,3 +49,13 @@ class AiDecisionService:
             return command
 
         return type(provider).__name__
+
+
+def _json_default(value: Any) -> Any:
+    if is_dataclass(value):
+        return asdict(value)
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime | date | time):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
