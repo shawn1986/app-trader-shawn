@@ -104,6 +104,11 @@ class FakeAccountService:
         return self.snapshot
 
 
+class ExplodingAccountService:
+    def fetch_account_snapshot(self) -> AccountSnapshot:
+        raise AssertionError("account snapshot should not be fetched")
+
+
 class FakePositionService:
     def __init__(self, *, open_symbol_count: int = 0) -> None:
         self.open_symbol_count = open_symbol_count
@@ -330,6 +335,34 @@ def test_trade_command_executes_entry_workflow(monkeypatch) -> None:
     assert position_service.count_calls == ["AMD"]
     assert risk_guard.calls[0][0] is candidate
     assert executor.open_calls == [(candidate, 1.1, 1)]
+
+
+def test_trade_command_returns_no_candidates_without_fetching_account(monkeypatch) -> None:
+    runner = CliRunner()
+    scanner = FakeScanner([])
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=scanner,
+            account_service=ExplodingAccountService(),
+            position_service=FakePositionService(open_symbol_count=0),
+            risk_guard=FakeRiskGuard(allowed=True),
+            executor=FakeExecutor(),
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "command": "trade",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "live_enabled": False,
+        "mode": "paper",
+        "status": "no_candidates",
+    }
 
 
 def test_manage_command_fails_closed_without_supported_runtime(monkeypatch) -> None:

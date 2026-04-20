@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread, OptionQuote
 from trader_shawn.execution.ibkr_executor import IbkrExecutor
-from trader_shawn.market_data.ibkr_market_data import IbkrMarketDataClient
+from trader_shawn.market_data.ibkr_market_data import (
+    IbkrMarketDataClient,
+    _extract_delta,
+)
 
 
 @dataclass
@@ -181,12 +184,12 @@ class FakeMarketDataClient:
         return [
             SimpleNamespace(
                 account="DU123",
-                position=2,
+                position=-1,
                 contract=SimpleNamespace(secType="OPT", symbol="AMD"),
             ),
             SimpleNamespace(
                 account="DU123",
-                position=0,
+                position=1,
                 contract=SimpleNamespace(secType="OPT", symbol="AMD"),
             ),
             SimpleNamespace(
@@ -407,3 +410,12 @@ def test_ibkr_market_data_client_maps_account_summary_and_counts_open_option_pos
     )
     assert snapshot.updated_at.tzinfo is UTC
     assert client.count_open_option_positions() == 1
+
+
+def test_extract_delta_falls_back_to_model_greeks_when_bid_delta_missing() -> None:
+    snapshot = SimpleNamespace(
+        bidGreeks=SimpleNamespace(delta=None),
+        modelGreeks=SimpleNamespace(delta=-0.18),
+    )
+
+    assert _extract_delta(snapshot) == -0.18

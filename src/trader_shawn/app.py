@@ -434,6 +434,11 @@ def _execute_entry_workflow(command: str, runtime: CliRuntime) -> dict[str, Any]
     candidates, candidate_error = _scan_candidates(runtime, command=command)
     if candidate_error is not None:
         return candidate_error
+    if not candidates:
+        return {
+            **_command_envelope(command, runtime=runtime),
+            "status": "no_candidates",
+        }
 
     if candidates:
         if getattr(runtime, "decision_service", None) is None:

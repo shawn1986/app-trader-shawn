@@ -150,7 +150,7 @@ class IbkrMarketDataClient:
             if float(getattr(position, "position", 0)) == 0:
                 continue
             count += 1
-        return count
+        return math.ceil(count / 2)
 
     def count_open_option_symbols(self) -> int:
         symbols: set[str] = set()
@@ -268,10 +268,14 @@ def _ticker_to_quote_row(snapshot: Any) -> dict[str, object]:
 
 
 def _extract_delta(snapshot: Any) -> float | None:
-    greeks = getattr(snapshot, "bidGreeks", None) or getattr(snapshot, "modelGreeks", None)
-    if greeks is None:
-        return None
-    return _optional_float(getattr(greeks, "delta", None))
+    for field_name in ("bidGreeks", "modelGreeks", "askGreeks", "lastGreeks"):
+        greeks = getattr(snapshot, field_name, None)
+        if greeks is None:
+            continue
+        delta = _optional_float(getattr(greeks, "delta", None))
+        if delta is not None:
+            return delta
+    return None
 
 
 def _extract_option_metric(snapshot: Any, right: str, metric: str) -> int:
