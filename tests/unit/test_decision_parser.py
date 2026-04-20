@@ -80,3 +80,15 @@ def test_state_store_returns_empty_state_for_malformed_json(tmp_path: Path) -> N
     store = StateStore(path)
 
     assert store.load() == {}
+
+
+@pytest.mark.parametrize("raw_value", ["[]", '"x"', "1"])
+def test_state_store_returns_empty_state_for_non_object_json(
+    tmp_path: Path,
+    raw_value: str,
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(raw_value, encoding="utf-8")
+    store = StateStore(path)
+
+    assert store.load() == {}
