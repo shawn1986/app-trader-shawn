@@ -34,10 +34,7 @@ def create_war_room_app(
 
     @app.get("/war-room")
     def war_room_shell(request: Request):
-        return templates.TemplateResponse(
-            "war_room.html",
-            {"request": request},
-        )
+        return templates.TemplateResponse(request, "war_room.html")
 
     @app.get("/api/war-room/snapshot")
     def get_war_room_snapshot() -> JSONResponse:

@@ -294,6 +294,7 @@ def test_cli_has_expected_subcommands() -> None:
     assert "decide" in result.output
     assert "trade" in result.output
     assert "manage" in result.output
+    assert "war-room" in result.output
 
 
 def test_dashboard_command_returns_default_snapshot_for_missing_file(tmp_path: Path) -> None:
