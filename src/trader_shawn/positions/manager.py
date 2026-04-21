@@ -97,6 +97,8 @@ class PositionManager:
                     },
                     created_at=recorded_at,
                 )
+            else:
+                continue
             promoted_position = dict(managed_position)
             promoted_position["status"] = "open"
             matched_positions.append(promoted_position)

@@ -558,6 +558,15 @@ def _execute_entry_workflow(command: str, runtime: CliRuntime) -> dict[str, Any]
             **_command_envelope(command, runtime=runtime),
             **uncertain_open_state,
         }
+    pending_open_state = _detect_pending_open_submission(
+        runtime,
+        ticker=matched_spread.ticker,
+    )
+    if pending_open_state is not None:
+        return {
+            **_command_envelope(command, runtime=runtime),
+            **pending_open_state,
+        }
 
     if runtime.risk_guard is None:
         result = {"status": "risk_rejected", "reason": "risk_guard_missing"}
@@ -886,11 +895,42 @@ def _detect_unresolved_uncertain_open_submission(
     )
 
 
+def _detect_pending_open_submission(
+    runtime: CliRuntime,
+    *,
+    ticker: str,
+) -> dict[str, Any] | None:
+    return _detect_active_position_event(
+        runtime,
+        event_type="open_submitted",
+        ticker=ticker,
+        allowed_statuses={"opening"},
+        reason="pending_open_submission",
+    )
+
+
 def _detect_unresolved_uncertain_submission(
     runtime: CliRuntime,
     *,
     event_type: str,
     ticker: str | None = None,
+) -> dict[str, Any] | None:
+    return _detect_active_position_event(
+        runtime,
+        event_type=event_type,
+        ticker=ticker,
+        allowed_statuses=None,
+        reason="uncertain_submit_state",
+    )
+
+
+def _detect_active_position_event(
+    runtime: CliRuntime,
+    *,
+    event_type: str,
+    ticker: str | None,
+    allowed_statuses: set[str] | None,
+    reason: str,
 ) -> dict[str, Any] | None:
     if ticker == "":
         return None
@@ -915,6 +955,8 @@ def _detect_unresolved_uncertain_submission(
         for position in active_positions:
             if ticker is not None and str(position.get("ticker", "")) != ticker:
                 continue
+            if allowed_statuses is not None and str(position.get("status", "")) not in allowed_statuses:
+                continue
             events = fetch_position_events(str(position["position_id"]))
             if events and events[-1].get("event_type") == event_type:
                 fingerprints.append(str(position["broker_fingerprint"]))
@@ -934,7 +976,7 @@ def _detect_unresolved_uncertain_submission(
 
     return {
         "status": "anomaly",
-        "reason": "uncertain_submit_state",
+        "reason": reason,
         "fingerprints": sorted(set(fingerprints)),
         "manual_intervention_required": True,
     }
