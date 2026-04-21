@@ -6,12 +6,10 @@ from typing import Any
 from trader_shawn.war_room.models import (
     AccountRail,
     BrokerCommandStatus,
-    CommandStatus,
     Freshness,
     HotPosition,
     ThreatLevel,
     ThreatRail,
-    WarRoomSnapshot,
 )
 
 BROKER_STALE_AFTER = timedelta(seconds=30)
@@ -26,8 +24,11 @@ def build_war_room_snapshot(
     broker_health: dict[str, Any] | None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    current_time = now or datetime.now(UTC)
-    last_cycle = _as_dict((dashboard_state or {}).get("last_cycle"))
+    current_time = _normalize_datetime(now or datetime.now(UTC))
+    normalized_dashboard_state = _as_dict(dashboard_state)
+    last_cycle = _as_dict(normalized_dashboard_state.get("last_cycle"))
+    normalized_positions = _as_dict_list(managed_positions)
+    normalized_events = _as_dict_list(position_events)
 
     threat_rail = ThreatRail(
         cycle_status=_as_non_empty_str(last_cycle.get("status")),
@@ -35,25 +36,34 @@ def build_war_room_snapshot(
         manual_intervention_required=bool(last_cycle.get("manual_intervention_required")),
         fingerprints=_as_str_list(last_cycle.get("fingerprints")),
     )
-    command_status = CommandStatus(
-        broker=_build_broker_command_status(broker_health, now=current_time),
-    )
+    broker_status = _build_broker_command_status(broker_health, now=current_time)
     hot_positions = _build_hot_positions(
-        managed_positions=managed_positions or [],
-        position_events=position_events or [],
+        managed_positions=normalized_positions,
+        position_events=normalized_events,
     )
-    snapshot = WarRoomSnapshot(
-        threat_level=_derive_threat_level(
-            threat_rail=threat_rail,
-            broker_status=command_status.broker,
-            hot_positions=hot_positions,
-        ),
-        command_status=command_status,
+    account_rail = _build_account_rail(_as_dict(account_snapshot))
+    threat_level = _derive_threat_level(
         threat_rail=threat_rail,
-        account_rail=_build_account_rail(account_snapshot or {}),
+        broker_status=broker_status,
         hot_positions=hot_positions,
     )
-    return snapshot.to_dict()
+    return {
+        "generated_at": current_time.isoformat(),
+        "threat_level": threat_level,
+        "command_status": {
+            "broker": broker_status.to_dict(),
+            "dashboard_status": _as_non_empty_str(normalized_dashboard_state.get("status")),
+            "last_cycle": dict(last_cycle),
+        },
+        "risk_deck": _build_risk_deck(
+            account_rail=account_rail,
+            active_managed_positions=len(normalized_positions),
+        ),
+        "hot_positions": [position.to_dict() for position in hot_positions],
+        "mission_log": _build_mission_log(normalized_events),
+        "threat_rail": threat_rail.to_dict(),
+        "account_rail": account_rail.to_dict(),
+    }
 
 
 def _build_account_rail(account_snapshot: dict[str, Any]) -> AccountRail:
@@ -63,6 +73,36 @@ def _build_account_rail(account_snapshot: dict[str, Any]) -> AccountRail:
         open_risk=_as_float(account_snapshot.get("open_risk")),
         new_positions_today=_as_int(account_snapshot.get("new_positions_today")),
     )
+
+
+def _build_risk_deck(
+    *,
+    account_rail: AccountRail,
+    active_managed_positions: int,
+) -> dict[str, Any]:
+    return {
+        "net_liquidation": account_rail.net_liquidation,
+        "unrealized_pnl": account_rail.unrealized_pnl,
+        "open_risk": account_rail.open_risk,
+        "new_positions_today": account_rail.new_positions_today,
+        "active_managed_positions": active_managed_positions,
+    }
+
+
+def _build_mission_log(position_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    mission_log: list[dict[str, Any]] = []
+    for event in position_events:
+        payload_json = event.get("payload_json")
+        payload = payload_json if isinstance(payload_json, dict) else _as_dict(event.get("payload"))
+        mission_log.append(
+            {
+                "position_id": _as_non_empty_str(event.get("position_id")),
+                "event_type": _as_non_empty_str(event.get("event_type")),
+                "payload": payload,
+                "created_at": _event_iso(event),
+            }
+        )
+    return mission_log
 
 
 def _build_broker_command_status(
@@ -197,6 +237,12 @@ def _as_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
+
+
+def _as_dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 def _as_non_empty_str(value: Any) -> str:

@@ -1,6 +1,11 @@
+from pathlib import Path
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
+from trader_shawn.monitoring.audit_logger import AuditLogger
 from trader_shawn.war_room.web import create_war_room_app
+from trader_shawn.war_room.web import create_default_snapshot_provider
 
 
 def test_snapshot_endpoint_returns_war_room_payload() -> None:
@@ -61,3 +66,66 @@ def test_trade_endpoint_requires_explicit_confirmation() -> None:
 
     assert response.status_code == 409
     assert response.json()["reason"] == "trade_confirmation_required"
+
+
+def test_snapshot_endpoint_uses_default_provider_with_runtime_sources(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    dashboard_path = tmp_path / "dashboard.json"
+    dashboard_path.write_text(
+        '{"status":"updated","last_cycle":{"status":"ok","managed_count":1},"error":null}',
+        encoding="utf-8",
+    )
+    audit_logger = AuditLogger(tmp_path / "audit.db")
+    audit_logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.1,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+        }
+    )
+    audit_logger.record_position_event(
+        "pos-1",
+        "close_submit_uncertain",
+        {"error": "submit temporarily unavailable"},
+    )
+
+    class StubAccountService:
+        def fetch_account_snapshot(self) -> dict[str, float]:
+            return {
+                "net_liquidation": 50_000.0,
+                "unrealized_pnl": -100.0,
+                "open_risk": 3_000.0,
+                "new_positions_today": 1,
+            }
+
+    runtime = SimpleNamespace(
+        dashboard_state_path=dashboard_path,
+        settings=SimpleNamespace(audit_db_path=tmp_path / "audit.db", mode="paper"),
+        account_service=StubAccountService(),
+    )
+    monkeypatch.setattr(
+        "trader_shawn.war_room.web.build_cli_runtime",
+        lambda: runtime,
+    )
+
+    app = create_war_room_app(snapshot_provider=create_default_snapshot_provider())
+    client = TestClient(app)
+
+    response = client.get("/api/war-room/snapshot")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["risk_deck"]["active_managed_positions"] == 1
+    assert payload["command_status"]["last_cycle"]["status"] == "ok"
+    assert payload["mission_log"][0]["event_type"] == "close_submit_uncertain"

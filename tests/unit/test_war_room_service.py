@@ -1,6 +1,9 @@
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+from trader_shawn.monitoring.audit_logger import AuditLogger
 from trader_shawn.war_room.service import build_war_room_snapshot
+from trader_shawn.war_room.web import create_default_snapshot_provider
 
 
 def test_build_war_room_snapshot_promotes_manual_intervention_to_critical() -> None:
@@ -165,3 +168,45 @@ def test_build_war_room_snapshot_prioritizes_hot_positions_by_uncertain_then_clo
         "pos-normal-closing",
         "pos-normal-open",
     ]
+
+
+def test_default_snapshot_provider_reads_dashboard_and_audit_db(tmp_path: Path) -> None:
+    dashboard_path = tmp_path / "dashboard.json"
+    dashboard_path.write_text(
+        '{"status":"updated","last_cycle":{"status":"ok","managed_count":2},"error":null}',
+        encoding="utf-8",
+    )
+    audit_logger = AuditLogger(tmp_path / "audit.db")
+    audit_logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.1,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+        }
+    )
+    audit_logger.record_position_event(
+        "pos-1",
+        "close_submit_uncertain",
+        {"error": "submit temporarily unavailable"},
+        created_at="2026-04-21T01:00:00+00:00",
+    )
+
+    provider = create_default_snapshot_provider(
+        dashboard_state_path=dashboard_path,
+        audit_db_path=tmp_path / "audit.db",
+    )
+
+    snapshot = provider()
+
+    assert snapshot["risk_deck"]["active_managed_positions"] == 1
+    assert snapshot["command_status"]["last_cycle"]["status"] == "ok"
+    assert snapshot["mission_log"][0]["event_type"] == "close_submit_uncertain"
