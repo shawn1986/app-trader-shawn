@@ -71,3 +71,97 @@ def test_build_war_room_snapshot_marks_broker_data_stale_after_timeout() -> None
 
     assert snapshot["command_status"]["broker"]["freshness"] == "stale"
     assert snapshot["threat_level"] == "warning"
+
+
+def test_build_war_room_snapshot_handles_naive_now_with_aware_checked_at() -> None:
+    snapshot = build_war_room_snapshot(
+        dashboard_state={"status": "idle", "last_cycle": {}, "error": None},
+        account_snapshot={},
+        managed_positions=[],
+        position_events=[],
+        broker_health={
+            "connected": True,
+            "latency_ms": 20,
+            "checked_at": "2026-04-21T01:00:00+00:00",
+            "message": "",
+        },
+        now=datetime(2026, 4, 21, 1, 0, 20),
+    )
+
+    assert snapshot["command_status"]["broker"]["freshness"] == "fresh"
+    assert snapshot["threat_level"] == "nominal"
+
+
+def test_build_war_room_snapshot_prioritizes_hot_positions_by_uncertain_then_closing() -> None:
+    snapshot = build_war_room_snapshot(
+        dashboard_state={"status": "idle", "last_cycle": {}, "error": None},
+        account_snapshot={},
+        managed_positions=[
+            {
+                "position_id": "pos-normal-open",
+                "ticker": "AAPL",
+                "status": "open",
+                "expiry": "2026-05-01",
+                "last_known_debit": 0.5,
+                "opened_at": "2026-04-20T09:32:00+00:00",
+            },
+            {
+                "position_id": "pos-uncertain-open",
+                "ticker": "NVDA",
+                "status": "open",
+                "expiry": "2026-05-01",
+                "last_known_debit": 0.8,
+                "opened_at": "2026-04-20T09:33:00+00:00",
+            },
+            {
+                "position_id": "pos-uncertain-closing",
+                "ticker": "AMD",
+                "status": "closing",
+                "expiry": "2026-05-01",
+                "last_known_debit": 1.1,
+                "opened_at": "2026-04-20T09:31:00+00:00",
+            },
+            {
+                "position_id": "pos-normal-closing",
+                "ticker": "TSLA",
+                "status": "closing",
+                "expiry": "2026-05-01",
+                "last_known_debit": 1.0,
+                "opened_at": "2026-04-20T09:34:00+00:00",
+            },
+        ],
+        position_events=[
+            {
+                "position_id": "pos-uncertain-open",
+                "event_type": "close_submit_uncertain",
+                "payload_json": {},
+                "created_at": "2026-04-21T01:00:01+00:00",
+            },
+            {
+                "position_id": "pos-uncertain-closing",
+                "event_type": "close_submit_uncertain",
+                "payload_json": {},
+                "created_at": "2026-04-21T01:00:02+00:00",
+            },
+            {
+                "position_id": "pos-normal-closing",
+                "event_type": "close_submitted",
+                "payload_json": {},
+                "created_at": "2026-04-21T01:00:03+00:00",
+            },
+        ],
+        broker_health={
+            "connected": True,
+            "latency_ms": 11,
+            "checked_at": "2026-04-21T01:00:00+00:00",
+            "message": "",
+        },
+        now=datetime(2026, 4, 21, 1, 0, tzinfo=UTC),
+    )
+
+    assert [position["position_id"] for position in snapshot["hot_positions"]] == [
+        "pos-uncertain-closing",
+        "pos-uncertain-open",
+        "pos-normal-closing",
+        "pos-normal-open",
+    ]

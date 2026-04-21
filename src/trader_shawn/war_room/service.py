@@ -86,7 +86,9 @@ def _build_broker_command_status(
 def _derive_freshness(*, checked_at: datetime | None, now: datetime) -> Freshness:
     if checked_at is None:
         return "unknown"
-    if now - checked_at > BROKER_STALE_AFTER:
+    normalized_now = _normalize_datetime(now)
+    normalized_checked_at = _normalize_datetime(checked_at)
+    if normalized_now - normalized_checked_at > BROKER_STALE_AFTER:
         return "stale"
     return "fresh"
 
@@ -175,16 +177,20 @@ def _event_iso(event: dict[str, Any]) -> str | None:
 
 def _parse_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
-        return value
+        return _normalize_datetime(value)
     if not isinstance(value, str) or not value:
         return None
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed
+    return _normalize_datetime(parsed)
+
+
+def _normalize_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
