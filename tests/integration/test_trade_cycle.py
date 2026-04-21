@@ -812,3 +812,23 @@ def test_update_dashboard_state_round_trips_snapshot(tmp_path: Path) -> None:
         "last_cycle": last_cycle,
         "error": None,
     }
+
+
+def test_update_dashboard_state_preserves_manage_anomaly_fields(tmp_path: Path) -> None:
+    state_path = tmp_path / "dashboard.json"
+    last_cycle = {
+        "status": "anomaly",
+        "reason": "uncertain_submit_state",
+        "ticker": "AMD",
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "manual_intervention_required": True,
+    }
+
+    written = update_dashboard_state(state_path, last_cycle=last_cycle)
+    loaded = read_dashboard_snapshot(state_path)
+
+    assert written == loaded == {
+        "status": "updated",
+        "last_cycle": last_cycle,
+        "error": None,
+    }

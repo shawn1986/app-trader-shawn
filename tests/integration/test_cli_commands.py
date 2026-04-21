@@ -54,6 +54,7 @@ def _settings(*, symbols: list[str] | None = None) -> SimpleNamespace:
         risk=SimpleNamespace(
             max_risk_per_trade_pct=0.02,
             max_daily_loss_pct=0.04,
+            max_new_positions_per_day=2,
             max_open_risk_pct=0.2,
             max_spreads_per_symbol=2,
             profit_take_pct=0.5,
@@ -70,7 +71,10 @@ def _settings(*, symbols: list[str] | None = None) -> SimpleNamespace:
         ibkr=SimpleNamespace(
             host="127.0.0.1",
             port=7497,
+            client_id=12,
         ),
+        events=[],
+        audit_db_path=(Path.cwd() / "runtime" / "audit.db").resolve(),
     )
 
 
@@ -182,6 +186,78 @@ def _runtime(
         executor=executor,
         dashboard_state_path=None,
     )
+
+
+def _install_real_builder_stubs(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    settings: SimpleNamespace | None = None,
+    position_manager: object | None = None,
+) -> dict[str, object]:
+    config_dir = (tmp_path / "config").resolve()
+    runtime_root = config_dir.parent
+    effective_settings = settings or _settings()
+    if getattr(effective_settings, "audit_db_path", None) is None:
+        effective_settings.audit_db_path = (runtime_root / "audit.db").resolve()
+
+    market_data = object()
+    audit_logger = object()
+    earnings_calendar = object()
+    executor = object()
+    decision_service = object()
+    risk_guard = object()
+    captured: dict[str, object] = {}
+
+    def fake_load_settings(received_config_dir: Path) -> SimpleNamespace:
+        captured["config_dir_arg"] = received_config_dir
+        return effective_settings
+
+    def fake_market_data_client(**kwargs: object) -> object:
+        captured["market_data_kwargs"] = kwargs
+        return market_data
+
+    def fake_earnings_calendar(events: object) -> object:
+        captured["events"] = events
+        return earnings_calendar
+
+    def fake_executor(**kwargs: object) -> object:
+        captured["executor_kwargs"] = kwargs
+        return executor
+
+    def fake_audit_logger(db_path: Path) -> object:
+        captured["audit_db_path"] = db_path
+        return audit_logger
+
+    def fake_risk_guard(risk_settings: object) -> object:
+        captured["risk_settings"] = risk_settings
+        return risk_guard
+
+    def fake_position_manager(**kwargs: object) -> object:
+        captured["position_manager_kwargs"] = kwargs
+        return position_manager if position_manager is not None else object()
+
+    monkeypatch.setattr(app_module, "_default_config_dir", lambda: config_dir)
+    monkeypatch.setattr(app_module, "load_settings", fake_load_settings)
+    monkeypatch.setattr(app_module, "IbkrMarketDataClient", fake_market_data_client)
+    monkeypatch.setattr(app_module, "EarningsCalendar", fake_earnings_calendar)
+    monkeypatch.setattr(app_module, "IbkrExecutor", fake_executor)
+    monkeypatch.setattr(app_module, "_build_decision_service", lambda _settings: decision_service)
+    monkeypatch.setattr(app_module, "AuditLogger", fake_audit_logger, raising=False)
+    monkeypatch.setattr(app_module, "RiskGuard", fake_risk_guard)
+    monkeypatch.setattr(app_module, "PositionManager", fake_position_manager, raising=False)
+
+    return {
+        "config_dir": config_dir,
+        "settings": effective_settings,
+        "market_data": market_data,
+        "audit_logger": audit_logger,
+        "earnings_calendar": earnings_calendar,
+        "executor": executor,
+        "decision_service": decision_service,
+        "risk_guard": risk_guard,
+        "captured": captured,
+    }
 
 
 def test_cli_has_expected_subcommands() -> None:
@@ -368,120 +444,35 @@ def test_trade_command_returns_no_candidates_without_fetching_account(monkeypatc
 
 
 def test_build_cli_runtime_wires_position_manager(tmp_path: Path, monkeypatch) -> None:
-    config_dir = (Path.cwd() / "config").resolve()
-    settings = SimpleNamespace(
-        mode="paper",
-        live_enabled=False,
-        symbols=["AMD"],
-        events=[{"ticker": "AMD", "date": "2026-04-30"}],
-        risk=SimpleNamespace(
-            max_risk_per_trade_pct=0.02,
-            max_daily_loss_pct=0.04,
-            max_new_positions_per_day=2,
-            max_open_risk_pct=0.2,
-            max_spreads_per_symbol=2,
-            profit_take_pct=0.5,
-            stop_loss_multiple=2.0,
-            exit_dte_threshold=5,
-        ),
-        providers=SimpleNamespace(
-            primary_provider="claude_cli",
-            secondary_provider="codex",
-            provider_timeout_seconds=15,
-            secondary_timeout_seconds=10,
-        ),
-        ibkr=SimpleNamespace(
-            host="127.0.0.1",
-            port=7497,
-            client_id=12,
-        ),
-        audit_db_path=tmp_path / "audit.db",
-    )
-    market_data = object()
-    audit_logger = object()
-    executor = object()
-    earnings_calendar = object()
-    decision_service = object()
-    risk_guard = object()
+    settings = _settings(symbols=["AMD"])
+    settings.events = [{"ticker": "AMD", "date": "2026-04-30"}]
+    settings.audit_db_path = (tmp_path / "audit.db").resolve()
     position_manager = object()
-    captured: dict[str, object] = {}
-
-    def fake_market_data_client(**kwargs: object) -> object:
-        captured["market_data_kwargs"] = kwargs
-        return market_data
-
-    def fake_audit_logger(db_path: Path) -> object:
-        captured["audit_db_path"] = db_path
-        return audit_logger
-
-    def fake_earnings_calendar(events: object) -> object:
-        captured["events"] = events
-        return earnings_calendar
-
-    def fake_executor(**kwargs: object) -> object:
-        captured["executor_kwargs"] = kwargs
-        return executor
-
-    def fake_risk_guard(risk_settings: object) -> object:
-        captured["risk_settings"] = risk_settings
-        return risk_guard
-
-    def fake_position_manager(**kwargs: object) -> object:
-        captured["position_manager_kwargs"] = kwargs
-        return position_manager
-
-    monkeypatch.setattr(app_module, "load_settings", lambda _config_dir: settings)
-    monkeypatch.setattr(
-        app_module,
-        "IbkrMarketDataClient",
-        fake_market_data_client,
+    builder = _install_real_builder_stubs(
+        monkeypatch,
+        tmp_path,
+        settings=settings,
+        position_manager=position_manager,
     )
-    monkeypatch.setattr(
-        app_module,
-        "AuditLogger",
-        fake_audit_logger,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        app_module,
-        "EarningsCalendar",
-        fake_earnings_calendar,
-    )
-    monkeypatch.setattr(
-        app_module,
-        "IbkrExecutor",
-        fake_executor,
-    )
-    monkeypatch.setattr(app_module, "_build_decision_service", lambda _settings: decision_service)
-    monkeypatch.setattr(
-        app_module,
-        "RiskGuard",
-        fake_risk_guard,
-    )
-    monkeypatch.setattr(
-        app_module,
-        "PositionManager",
-        fake_position_manager,
-        raising=False,
-    )
+    captured = builder["captured"]
 
     runtime = app_module.build_cli_runtime()
 
     assert runtime.settings is settings
-    assert runtime.config_dir == config_dir
-    assert runtime.account_service is market_data
-    assert runtime.position_service is market_data
-    assert runtime.decision_service is decision_service
-    assert runtime.executor is executor
-    assert runtime.risk_guard is risk_guard
+    assert runtime.config_dir == builder["config_dir"]
+    assert runtime.account_service is builder["market_data"]
+    assert runtime.position_service is builder["market_data"]
+    assert runtime.decision_service is builder["decision_service"]
+    assert runtime.executor is builder["executor"]
+    assert runtime.risk_guard is builder["risk_guard"]
     assert runtime.position_manager is position_manager
     assert captured["audit_db_path"] == settings.audit_db_path
     assert captured["events"] == settings.events
     assert captured["position_manager_kwargs"] == {
-        "audit_logger": audit_logger,
-        "market_data": market_data,
-        "executor": executor,
-        "earnings_calendar": earnings_calendar,
+        "audit_logger": builder["audit_logger"],
+        "market_data": builder["market_data"],
+        "executor": builder["executor"],
+        "earnings_calendar": builder["earnings_calendar"],
         "risk_settings": settings.risk,
         "mode": settings.mode,
     }
@@ -509,22 +500,24 @@ def test_manage_command_fails_closed_without_supported_runtime(monkeypatch) -> N
     }
 
 
-def test_manage_command_executes_real_runtime_manager(monkeypatch) -> None:
+def test_manage_command_executes_real_runtime_manager(tmp_path: Path, monkeypatch) -> None:
     runner = CliRunner()
+    expected_result = {
+        "status": "submitted",
+        "position_id": "pos-1",
+        "ticker": "AMD",
+        "exit_reason": "take_profit",
+        "payload": {"order_id": 404},
+    }
     manager = SimpleNamespace(
         manage_positions=lambda: {
-            "status": "submitted",
-            "position_id": "pos-1",
-            "ticker": "AMD",
-            "exit_reason": "take_profit",
-            "payload": {"order_id": 404},
+            **expected_result,
         }
     )
-    monkeypatch.setattr(
-        app_module,
-        "build_cli_runtime",
-        lambda: _runtime(position_manager=manager),
-        raising=False,
+    builder = _install_real_builder_stubs(
+        monkeypatch,
+        tmp_path,
+        position_manager=manager,
     )
 
     result = runner.invoke(cli, ["manage"])
@@ -532,30 +525,29 @@ def test_manage_command_executes_real_runtime_manager(monkeypatch) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.output)
 
-    assert payload["status"] == "submitted"
+    assert payload["status"] == expected_result["status"]
     assert payload["command"] == "manage"
-    assert payload["position_id"] == "pos-1"
-    assert payload["ticker"] == "AMD"
-    assert payload["exit_reason"] == "take_profit"
-    assert payload["payload"] == {"order_id": 404}
+    assert payload["position_id"] == expected_result["position_id"]
+    assert payload["ticker"] == expected_result["ticker"]
+    assert payload["exit_reason"] == expected_result["exit_reason"]
+    assert payload["payload"] == expected_result["payload"]
+    assert payload["config_dir"] == str(builder["config_dir"])
 
 
-def test_manage_command_updates_dashboard_snapshot(tmp_path: Path, monkeypatch) -> None:
+def test_manage_command_updates_dashboard_snapshot_via_real_builder(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     runner = CliRunner()
-    state_path = tmp_path / "dashboard.json"
-    monkeypatch.setattr(
-        app_module,
-        "build_cli_runtime",
-        lambda: SimpleNamespace(
-            settings=_settings(),
-            config_dir=(Path.cwd() / "config").resolve(),
-            position_manager=SimpleNamespace(
-                manage_positions=lambda: {"status": "ok", "managed_count": 1}
-            ),
-            dashboard_state_path=state_path,
-        ),
-        raising=False,
+    manager = SimpleNamespace(
+        manage_positions=lambda: {"status": "ok", "managed_count": 1}
     )
+    builder = _install_real_builder_stubs(
+        monkeypatch,
+        tmp_path,
+        position_manager=manager,
+    )
+    state_path = (builder["config_dir"].parent / "runtime" / "dashboard.json").resolve()
 
     result = runner.invoke(cli, ["manage"])
 
@@ -565,3 +557,45 @@ def test_manage_command_updates_dashboard_snapshot(tmp_path: Path, monkeypatch) 
         "last_cycle": {"status": "ok", "managed_count": 1},
         "error": None,
     }
+
+
+def test_scan_command_real_builder_ignores_unwritable_audit_db_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    blocked_parent = tmp_path / "blocked-parent"
+    blocked_parent.write_text("not-a-directory", encoding="utf-8")
+    settings = _settings()
+    settings.audit_db_path = blocked_parent / "audit.db"
+
+    monkeypatch.setattr(
+        app_module,
+        "_default_config_dir",
+        lambda: (tmp_path / "config").resolve(),
+    )
+    monkeypatch.setattr(app_module, "load_settings", lambda _config_dir: settings)
+    monkeypatch.setattr(app_module, "IbkrMarketDataClient", lambda **kwargs: object())
+    monkeypatch.setattr(app_module, "EarningsCalendar", lambda events: object())
+    monkeypatch.setattr(
+        app_module,
+        "CliScanner",
+        lambda **kwargs: SimpleNamespace(scan_candidates=lambda symbols: []),
+    )
+    monkeypatch.setattr(app_module, "IbkrExecutor", lambda **kwargs: object())
+    monkeypatch.setattr(app_module, "_build_decision_service", lambda _settings: object())
+    monkeypatch.setattr(app_module, "RiskGuard", lambda risk_settings: object())
+
+    result = runner.invoke(cli, ["scan"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "command": "scan",
+        "config_dir": str((tmp_path / "config").resolve()),
+        "live_enabled": False,
+        "mode": "paper",
+        "status": "ok",
+        "candidate_count": 0,
+        "candidates": [],
+    }
+    assert not settings.audit_db_path.exists()

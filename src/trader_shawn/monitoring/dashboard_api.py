@@ -90,6 +90,16 @@ def _normalize_last_cycle(last_cycle: Any) -> dict[str, Any]:
     if isinstance(managed_count, int) and not isinstance(managed_count, bool):
         normalized["managed_count"] = managed_count
 
+    fingerprints = last_cycle.get("fingerprints")
+    if isinstance(fingerprints, list):
+        normalized["fingerprints"] = [
+            item for item in fingerprints if isinstance(item, str) and item
+        ]
+
+    manual_intervention_required = last_cycle.get("manual_intervention_required")
+    if isinstance(manual_intervention_required, bool):
+        normalized["manual_intervention_required"] = manual_intervention_required
+
     if "payload" in last_cycle:
         payload = last_cycle.get("payload")
         normalized["payload"] = dict(payload) if isinstance(payload, dict) else {}

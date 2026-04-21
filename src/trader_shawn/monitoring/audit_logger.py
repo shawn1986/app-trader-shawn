@@ -38,17 +38,23 @@ class AuditLogger:
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
+        self._schema_ready = False
 
     def _connect(self) -> ContextManager[sqlite3.Connection]:
+        self._ensure_schema()
         connection = sqlite3.connect(self._db_path)
         connection.row_factory = sqlite3.Row
         connection.execute("pragma foreign_keys = on")
         return closing(connection)
 
     def _ensure_schema(self) -> None:
-        with self._connect() as connection:
+        if self._schema_ready:
+            return
+
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self._db_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("pragma foreign_keys = on")
             connection.execute(
                 """
                 create table if not exists decisions (
@@ -100,6 +106,7 @@ class AuditLogger:
             )
             self._migrate_position_events_payload_column(connection)
             connection.commit()
+        self._schema_ready = True
 
     def _migrate_position_events_payload_column(
         self,
