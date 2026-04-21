@@ -919,6 +919,78 @@ def test_trade_command_blocks_when_open_submission_is_pending(
     assert executor.open_calls == []
 
 
+def test_trade_command_blocks_when_opening_position_exists_without_event(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+    audit_logger = AuditLogger(tmp_path / "audit.db")
+    audit_logger.upsert_managed_position(
+        {
+            "position_id": "trade-open-pending-no-event",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.10,
+            "entry_order_id": 123,
+            "mode": "paper",
+            "status": "opening",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by trade",
+            "risk_note": "",
+        }
+    )
+    executor = FakeExecutor()
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=FakeDecisionService(
+                decision=SimpleNamespace(
+                    action="approve",
+                    ticker="AMD",
+                    strategy="bull_put_credit_spread",
+                    expiry="2026-04-30",
+                    short_strike=160,
+                    long_strike=155,
+                    limit_credit=1.10,
+                    reason="approved",
+                )
+            ),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=0),
+            risk_guard=FakeRiskGuard(allowed=True),
+            executor=executor,
+            audit_logger=audit_logger,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "command": "trade",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "live_enabled": False,
+        "manual_intervention_required": True,
+        "mode": "paper",
+        "reason": "pending_open_submission",
+        "status": "anomaly",
+    }
+    assert executor.open_calls == []
+
+
 def test_trade_command_returns_no_candidates_without_fetching_account(monkeypatch) -> None:
     runner = CliRunner()
     scanner = FakeScanner([])

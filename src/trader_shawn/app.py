@@ -906,6 +906,7 @@ def _detect_pending_open_submission(
         ticker=ticker,
         allowed_statuses={"opening"},
         reason="pending_open_submission",
+        treat_missing_events_as_match=True,
     )
 
 
@@ -921,6 +922,7 @@ def _detect_unresolved_uncertain_submission(
         ticker=ticker,
         allowed_statuses=None,
         reason="uncertain_submit_state",
+        treat_missing_events_as_match=False,
     )
 
 
@@ -931,6 +933,7 @@ def _detect_active_position_event(
     ticker: str | None,
     allowed_statuses: set[str] | None,
     reason: str,
+    treat_missing_events_as_match: bool,
 ) -> dict[str, Any] | None:
     if ticker == "":
         return None
@@ -958,6 +961,9 @@ def _detect_active_position_event(
             if allowed_statuses is not None and str(position.get("status", "")) not in allowed_statuses:
                 continue
             events = fetch_position_events(str(position["position_id"]))
+            if not events and treat_missing_events_as_match:
+                fingerprints.append(str(position["broker_fingerprint"]))
+                continue
             if events and events[-1].get("event_type") == event_type:
                 fingerprints.append(str(position["broker_fingerprint"]))
     except Exception as exc:
