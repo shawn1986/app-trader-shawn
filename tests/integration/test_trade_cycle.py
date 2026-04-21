@@ -99,6 +99,58 @@ class StubExecutor:
         }
 
 
+class IbkrShapeExecutor(StubExecutor):
+    def submit_open_credit_spread(
+        self,
+        payload: object,
+        *,
+        limit_credit: float,
+        quantity: int = 1,
+    ) -> dict:
+        if self._error is not None:
+            raise self._error
+        self.open_calls.append((payload, limit_credit, quantity))
+        return {
+            "status": "submitted",
+            "broker": "ibkr",
+            "order_id": 321,
+            "order": {
+                "action": "SELL",
+                "orderType": "LMT",
+                "totalQuantity": quantity,
+                "lmtPrice": limit_credit,
+                "transmit": True,
+            },
+            "contract": {
+                "symbol": payload.ticker,
+                "secType": "BAG",
+                "currency": "USD",
+                "exchange": "SMART",
+            },
+            "legs": [
+                {
+                    "con_id": 70160,
+                    "action": "SELL",
+                    "ratio": 1,
+                    "exchange": "SMART",
+                    "right": "P",
+                    "strike": 160.0,
+                    "expiry": payload.expiry,
+                },
+                {
+                    "con_id": 70155,
+                    "action": "BUY",
+                    "ratio": 1,
+                    "exchange": "SMART",
+                    "right": "P",
+                    "strike": 155.0,
+                    "expiry": payload.expiry,
+                },
+            ],
+            "broker_status": "PendingSubmit",
+        }
+
+
 class StubRiskGuard:
     def __init__(self, *, allowed: bool, reason: str = "ok") -> None:
         self.allowed = allowed
@@ -404,6 +456,204 @@ def test_trade_cycle_command_executes_workflow_and_updates_dashboard(monkeypatch
             },
         },
         "error": None,
+    }
+
+
+def test_trade_cycle_command_preserves_ibkr_submission_shape_in_dashboard(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+    state_path = tmp_path / "dashboard.json"
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=StubDecisionService(limit_credit=1.10),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=1),
+            risk_guard=StubRiskGuard(allowed=True),
+            executor=IbkrShapeExecutor(),
+            dashboard_state_path=state_path,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade-cycle"])
+
+    assert result.exit_code == 0
+    assert read_dashboard_snapshot(state_path) == {
+        "status": "updated",
+        "last_cycle": {
+            "status": "submitted",
+            "broker": "ibkr",
+            "order_id": 321,
+            "order": {
+                "action": "SELL",
+                "orderType": "LMT",
+                "totalQuantity": 1,
+                "lmtPrice": 1.1,
+                "transmit": True,
+            },
+            "contract": {
+                "symbol": "AMD",
+                "secType": "BAG",
+                "currency": "USD",
+                "exchange": "SMART",
+            },
+            "legs": [
+                {
+                    "con_id": 70160,
+                    "action": "SELL",
+                    "ratio": 1,
+                    "exchange": "SMART",
+                    "right": "P",
+                    "strike": 160.0,
+                    "expiry": "2026-04-30",
+                },
+                {
+                    "con_id": 70155,
+                    "action": "BUY",
+                    "ratio": 1,
+                    "exchange": "SMART",
+                    "right": "P",
+                    "strike": 155.0,
+                    "expiry": "2026-04-30",
+                },
+            ],
+            "broker_status": "PendingSubmit",
+        },
+        "error": None,
+    }
+
+
+def test_trade_cycle_command_reports_dashboard_update_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=StubDecisionService(limit_credit=1.10),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=1),
+            risk_guard=StubRiskGuard(allowed=True),
+            executor=StubExecutor(),
+            dashboard_state_path=tmp_path / "dashboard.json",
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "update_dashboard_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("dashboard write failed")),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade-cycle"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "command": "trade-cycle",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "dashboard_error": {
+            "type": "OSError",
+            "message": "dashboard write failed",
+        },
+        "live_enabled": False,
+        "mode": "paper",
+        "payload": {
+            "expiry": "2026-04-30",
+            "long_strike": 155,
+            "short_strike": 160,
+            "symbol": "AMD",
+        },
+        "status": "submitted",
+    }
+
+
+def test_trade_cycle_command_preserves_ibkr_submission_when_dashboard_update_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=StubDecisionService(limit_credit=1.10),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=1),
+            risk_guard=StubRiskGuard(allowed=True),
+            executor=IbkrShapeExecutor(),
+            dashboard_state_path=tmp_path / "dashboard.json",
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "update_dashboard_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("dashboard write failed")),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade-cycle"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "command": "trade-cycle",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "dashboard_error": {
+            "type": "OSError",
+            "message": "dashboard write failed",
+        },
+        "live_enabled": False,
+        "mode": "paper",
+        "status": "submitted",
+        "broker": "ibkr",
+        "order_id": 321,
+        "order": {
+            "action": "SELL",
+            "orderType": "LMT",
+            "totalQuantity": 1,
+            "lmtPrice": 1.1,
+            "transmit": True,
+        },
+        "contract": {
+            "symbol": "AMD",
+            "secType": "BAG",
+            "currency": "USD",
+            "exchange": "SMART",
+        },
+        "legs": [
+            {
+                "con_id": 70160,
+                "action": "SELL",
+                "ratio": 1,
+                "exchange": "SMART",
+                "right": "P",
+                "strike": 160.0,
+                "expiry": "2026-04-30",
+            },
+            {
+                "con_id": 70155,
+                "action": "BUY",
+                "ratio": 1,
+                "exchange": "SMART",
+                "right": "P",
+                "strike": 155.0,
+                "expiry": "2026-04-30",
+            },
+        ],
+        "broker_status": "PendingSubmit",
     }
 
 

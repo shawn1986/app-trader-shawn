@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from trader_shawn.domain.models import _json_safe_payload
 from trader_shawn.monitoring.state_store import StateStore, StateStoreError
 
 
@@ -76,6 +77,8 @@ def _normalize_last_cycle(last_cycle: Any) -> dict[str, Any]:
         "status",
         "reason",
         "action",
+        "broker",
+        "broker_status",
         "error_type",
         "message",
         "ticker",
@@ -90,19 +93,38 @@ def _normalize_last_cycle(last_cycle: Any) -> dict[str, Any]:
     if isinstance(managed_count, int) and not isinstance(managed_count, bool):
         normalized["managed_count"] = managed_count
 
+    order_id = last_cycle.get("order_id")
+    if isinstance(order_id, int) and not isinstance(order_id, bool):
+        normalized["order_id"] = order_id
+
     fingerprints = last_cycle.get("fingerprints")
     if isinstance(fingerprints, list):
         normalized["fingerprints"] = [
             item for item in fingerprints if isinstance(item, str) and item
         ]
 
+    for key in ("payload", "order", "contract"):
+        if key not in last_cycle:
+            continue
+        value = last_cycle.get(key)
+        if not isinstance(value, dict):
+            normalized[key] = {}
+            continue
+        try:
+            normalized[key] = _json_safe_payload(value, path=key)
+        except TypeError:
+            normalized[key] = {}
+
+    legs = last_cycle.get("legs")
+    if isinstance(legs, list):
+        try:
+            normalized["legs"] = _json_safe_payload(legs, path="legs")
+        except TypeError:
+            normalized["legs"] = []
+
     manual_intervention_required = last_cycle.get("manual_intervention_required")
     if isinstance(manual_intervention_required, bool):
         normalized["manual_intervention_required"] = manual_intervention_required
-
-    if "payload" in last_cycle:
-        payload = last_cycle.get("payload")
-        normalized["payload"] = dict(payload) if isinstance(payload, dict) else {}
 
     return normalized
 

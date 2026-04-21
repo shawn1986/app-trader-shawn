@@ -297,8 +297,7 @@ def _trade_cycle_command() -> dict[str, Any]:
     if error is not None:
         return error
     result = _execute_entry_workflow("trade-cycle", runtime)
-    _update_dashboard_snapshot(runtime, result)
-    return result
+    return _with_dashboard_error(result, _update_dashboard_snapshot(runtime, result))
 
 
 def _scan_command() -> dict[str, Any]:
@@ -349,8 +348,7 @@ def _trade_command() -> dict[str, Any]:
     if error is not None:
         return error
     result = _execute_entry_workflow("trade", runtime)
-    _update_dashboard_snapshot(runtime, result)
-    return result
+    return _with_dashboard_error(result, _update_dashboard_snapshot(runtime, result))
 
 
 def _manage_command() -> dict[str, Any]:
@@ -366,8 +364,10 @@ def _manage_command() -> dict[str, Any]:
             runtime=runtime,
             reason="position_management_not_supported",
         )
-        _update_dashboard_snapshot(runtime, response)
-        return response
+        return _with_dashboard_error(
+            response,
+            _update_dashboard_snapshot(runtime, response),
+        )
 
     try:
         result = manage_positions()
@@ -379,8 +379,10 @@ def _manage_command() -> dict[str, Any]:
             reason="position_management_failed",
             exc=exc,
         )
-        _update_dashboard_snapshot(runtime, response)
-        return response
+        return _with_dashboard_error(
+            response,
+            _update_dashboard_snapshot(runtime, response),
+        )
 
     if not isinstance(result, dict):
         result = {"status": "ok", "payload": _json_safe(result)}
@@ -388,8 +390,10 @@ def _manage_command() -> dict[str, Any]:
         **_command_envelope("manage", runtime=runtime),
         **_json_safe(result),
     }
-    _update_dashboard_snapshot(runtime, response)
-    return response
+    return _with_dashboard_error(
+        response,
+        _update_dashboard_snapshot(runtime, response),
+    )
 
 
 def _dashboard_command(state_path: str | Path) -> dict[str, Any]:
@@ -648,15 +652,34 @@ def _command_exception(
     }
 
 
-def _update_dashboard_snapshot(runtime: CliRuntime, result: dict[str, Any]) -> None:
+def _update_dashboard_snapshot(
+    runtime: CliRuntime,
+    result: dict[str, Any],
+) -> dict[str, str] | None:
     state_path = getattr(runtime, "dashboard_state_path", None)
     if state_path is None:
-        return
+        return None
 
     try:
         update_dashboard_state(state_path, last_cycle=result)
-    except Exception:
-        return
+    except Exception as exc:
+        return {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
+    return None
+
+
+def _with_dashboard_error(
+    result: dict[str, Any],
+    dashboard_error: dict[str, str] | None,
+) -> dict[str, Any]:
+    if dashboard_error is None:
+        return result
+    return {
+        **result,
+        "dashboard_error": dashboard_error,
+    }
 
 
 def _json_safe(value: Any) -> Any:
