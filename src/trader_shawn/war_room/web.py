@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from trader_shawn.war_room.commands import ArmedSessionStore, run_runtime_command
 
@@ -18,9 +21,23 @@ def create_war_room_app(
     command_runner: CommandRunner | None = None,
 ) -> FastAPI:
     app = FastAPI()
+    war_room_dir = Path(__file__).resolve().parent
+    app.mount(
+        "/static",
+        StaticFiles(directory=war_room_dir / "static"),
+        name="static",
+    )
+    templates = Jinja2Templates(directory=str(war_room_dir / "templates"))
     provider = snapshot_provider or _default_snapshot
     runner = command_runner or run_runtime_command
     armed_sessions = ArmedSessionStore()
+
+    @app.get("/war-room")
+    def war_room_shell(request: Request):
+        return templates.TemplateResponse(
+            "war_room.html",
+            {"request": request},
+        )
 
     @app.get("/api/war-room/snapshot")
     def get_war_room_snapshot() -> JSONResponse:

@@ -10,6 +10,7 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 import click
+import uvicorn
 
 from trader_shawn.ai.claude_cli_adapter import ClaudeCliAdapter
 from trader_shawn.ai.codex_adapter import CodexAdapter
@@ -232,6 +233,15 @@ def manage_command() -> None:
 @click.argument("state_path", type=click.Path(path_type=Path))
 def dashboard_command(state_path: Path) -> None:
     click.echo(json.dumps(_dashboard_command(state_path), sort_keys=True))
+
+
+@cli.command("war-room")
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8787, show_default=True, type=int)
+def war_room_command(host: str, port: int) -> None:
+    from trader_shawn.war_room.web import create_war_room_app
+
+    uvicorn.run(create_war_room_app(), host=host, port=port)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
