@@ -72,10 +72,23 @@ def _normalize_last_cycle(last_cycle: Any) -> dict[str, Any]:
         return {}
 
     normalized: dict[str, Any] = {}
-    for key in ("status", "reason", "action", "error_type", "message"):
+    for key in (
+        "status",
+        "reason",
+        "action",
+        "error_type",
+        "message",
+        "ticker",
+        "position_id",
+        "exit_reason",
+    ):
         value = last_cycle.get(key)
         if isinstance(value, str) and value:
             normalized[key] = value
+
+    managed_count = last_cycle.get("managed_count")
+    if isinstance(managed_count, int) and not isinstance(managed_count, bool):
+        normalized["managed_count"] = managed_count
 
     if "payload" in last_cycle:
         payload = last_cycle.get("payload")

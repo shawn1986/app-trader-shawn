@@ -19,7 +19,9 @@ from trader_shawn.domain.models import AccountSnapshot, CandidateSpread
 from trader_shawn.events.earnings_calendar import EarningsCalendar
 from trader_shawn.execution.ibkr_executor import IbkrExecutor
 from trader_shawn.market_data.ibkr_market_data import IbkrMarketDataClient
+from trader_shawn.monitoring.audit_logger import AuditLogger
 from trader_shawn.monitoring.dashboard_api import read_dashboard_snapshot, update_dashboard_state
+from trader_shawn.positions.manager import PositionManager
 from trader_shawn.risk.guard import RiskGuard
 from trader_shawn.settings import AppSettings, load_settings
 
@@ -260,6 +262,12 @@ def build_cli_runtime() -> CliRuntime:
         client_id=settings.ibkr.client_id,
     )
     earnings_calendar = EarningsCalendar(settings.events)
+    executor = IbkrExecutor(
+        host=settings.ibkr.host,
+        port=settings.ibkr.port,
+        client_id=settings.ibkr.client_id,
+    )
+    audit_logger = AuditLogger(settings.audit_db_path)
     return CliRuntime(
         settings=settings,
         config_dir=config_dir,
@@ -269,13 +277,17 @@ def build_cli_runtime() -> CliRuntime:
         ),
         account_service=market_data_client,
         decision_service=_build_decision_service(settings),
-        executor=IbkrExecutor(
-            host=settings.ibkr.host,
-            port=settings.ibkr.port,
-            client_id=settings.ibkr.client_id,
-        ),
+        executor=executor,
         risk_guard=RiskGuard(settings.risk),
         position_service=market_data_client,
+        position_manager=PositionManager(
+            audit_logger=audit_logger,
+            market_data=market_data_client,
+            executor=executor,
+            earnings_calendar=earnings_calendar,
+            risk_settings=settings.risk,
+            mode=settings.mode,
+        ),
         dashboard_state_path=(config_dir.parent / "runtime" / "dashboard.json").resolve(),
     )
 
@@ -349,29 +361,35 @@ def _manage_command() -> dict[str, Any]:
     manager = getattr(runtime, "position_manager", None)
     manage_positions = _resolve_runtime_method(manager, "manage_positions")
     if manage_positions is None:
-        return _runtime_unavailable(
+        response = _runtime_unavailable(
             "manage",
             runtime=runtime,
             reason="position_management_not_supported",
         )
+        _update_dashboard_snapshot(runtime, response)
+        return response
 
     try:
         result = manage_positions()
     except Exception as exc:
-        return _command_exception(
+        response = _command_exception(
             "manage",
             runtime=runtime,
             status="manage_error",
             reason="position_management_failed",
             exc=exc,
         )
+        _update_dashboard_snapshot(runtime, response)
+        return response
 
     if not isinstance(result, dict):
         result = {"status": "ok", "payload": _json_safe(result)}
-    return {
+    response = {
         **_command_envelope("manage", runtime=runtime),
         **_json_safe(result),
     }
+    _update_dashboard_snapshot(runtime, response)
+    return response
 
 
 def _dashboard_command(state_path: str | Path) -> dict[str, Any]:

@@ -166,6 +166,7 @@ def _runtime(
     decision_service: FakeDecisionService | None = None,
     account_service: FakeAccountService | None = None,
     position_service: FakePositionService | None = None,
+    position_manager: object | None = None,
     risk_guard: FakeRiskGuard | None = None,
     executor: FakeExecutor | None = None,
 ) -> SimpleNamespace:
@@ -176,6 +177,7 @@ def _runtime(
         decision_service=decision_service,
         account_service=account_service,
         position_service=position_service,
+        position_manager=position_manager,
         risk_guard=risk_guard,
         executor=executor,
         dashboard_state_path=None,
@@ -365,6 +367,126 @@ def test_trade_command_returns_no_candidates_without_fetching_account(monkeypatc
     }
 
 
+def test_build_cli_runtime_wires_position_manager(tmp_path: Path, monkeypatch) -> None:
+    config_dir = (Path.cwd() / "config").resolve()
+    settings = SimpleNamespace(
+        mode="paper",
+        live_enabled=False,
+        symbols=["AMD"],
+        events=[{"ticker": "AMD", "date": "2026-04-30"}],
+        risk=SimpleNamespace(
+            max_risk_per_trade_pct=0.02,
+            max_daily_loss_pct=0.04,
+            max_new_positions_per_day=2,
+            max_open_risk_pct=0.2,
+            max_spreads_per_symbol=2,
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        providers=SimpleNamespace(
+            primary_provider="claude_cli",
+            secondary_provider="codex",
+            provider_timeout_seconds=15,
+            secondary_timeout_seconds=10,
+        ),
+        ibkr=SimpleNamespace(
+            host="127.0.0.1",
+            port=7497,
+            client_id=12,
+        ),
+        audit_db_path=tmp_path / "audit.db",
+    )
+    market_data = object()
+    audit_logger = object()
+    executor = object()
+    earnings_calendar = object()
+    decision_service = object()
+    risk_guard = object()
+    position_manager = object()
+    captured: dict[str, object] = {}
+
+    def fake_market_data_client(**kwargs: object) -> object:
+        captured["market_data_kwargs"] = kwargs
+        return market_data
+
+    def fake_audit_logger(db_path: Path) -> object:
+        captured["audit_db_path"] = db_path
+        return audit_logger
+
+    def fake_earnings_calendar(events: object) -> object:
+        captured["events"] = events
+        return earnings_calendar
+
+    def fake_executor(**kwargs: object) -> object:
+        captured["executor_kwargs"] = kwargs
+        return executor
+
+    def fake_risk_guard(risk_settings: object) -> object:
+        captured["risk_settings"] = risk_settings
+        return risk_guard
+
+    def fake_position_manager(**kwargs: object) -> object:
+        captured["position_manager_kwargs"] = kwargs
+        return position_manager
+
+    monkeypatch.setattr(app_module, "load_settings", lambda _config_dir: settings)
+    monkeypatch.setattr(
+        app_module,
+        "IbkrMarketDataClient",
+        fake_market_data_client,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "AuditLogger",
+        fake_audit_logger,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "EarningsCalendar",
+        fake_earnings_calendar,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "IbkrExecutor",
+        fake_executor,
+    )
+    monkeypatch.setattr(app_module, "_build_decision_service", lambda _settings: decision_service)
+    monkeypatch.setattr(
+        app_module,
+        "RiskGuard",
+        fake_risk_guard,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "PositionManager",
+        fake_position_manager,
+        raising=False,
+    )
+
+    runtime = app_module.build_cli_runtime()
+
+    assert runtime.settings is settings
+    assert runtime.config_dir == config_dir
+    assert runtime.account_service is market_data
+    assert runtime.position_service is market_data
+    assert runtime.decision_service is decision_service
+    assert runtime.executor is executor
+    assert runtime.risk_guard is risk_guard
+    assert runtime.position_manager is position_manager
+    assert captured["audit_db_path"] == settings.audit_db_path
+    assert captured["events"] == settings.events
+    assert captured["position_manager_kwargs"] == {
+        "audit_logger": audit_logger,
+        "market_data": market_data,
+        "executor": executor,
+        "earnings_calendar": earnings_calendar,
+        "risk_settings": settings.risk,
+        "mode": settings.mode,
+    }
+
+
 def test_manage_command_fails_closed_without_supported_runtime(monkeypatch) -> None:
     runner = CliRunner()
     monkeypatch.setattr(
@@ -384,4 +506,62 @@ def test_manage_command_fails_closed_without_supported_runtime(monkeypatch) -> N
         "mode": "paper",
         "reason": "position_management_not_supported",
         "status": "runtime_unavailable",
+    }
+
+
+def test_manage_command_executes_real_runtime_manager(monkeypatch) -> None:
+    runner = CliRunner()
+    manager = SimpleNamespace(
+        manage_positions=lambda: {
+            "status": "submitted",
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "exit_reason": "take_profit",
+            "payload": {"order_id": 404},
+        }
+    )
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(position_manager=manager),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["manage"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+
+    assert payload["status"] == "submitted"
+    assert payload["command"] == "manage"
+    assert payload["position_id"] == "pos-1"
+    assert payload["ticker"] == "AMD"
+    assert payload["exit_reason"] == "take_profit"
+    assert payload["payload"] == {"order_id": 404}
+
+
+def test_manage_command_updates_dashboard_snapshot(tmp_path: Path, monkeypatch) -> None:
+    runner = CliRunner()
+    state_path = tmp_path / "dashboard.json"
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: SimpleNamespace(
+            settings=_settings(),
+            config_dir=(Path.cwd() / "config").resolve(),
+            position_manager=SimpleNamespace(
+                manage_positions=lambda: {"status": "ok", "managed_count": 1}
+            ),
+            dashboard_state_path=state_path,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["manage"])
+
+    assert result.exit_code == 0
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {
+        "status": "updated",
+        "last_cycle": {"status": "ok", "managed_count": 1},
+        "error": None,
     }
