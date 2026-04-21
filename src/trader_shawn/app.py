@@ -882,12 +882,24 @@ def _detect_unresolved_uncertain_open_submission(
         return None
 
     fingerprints: list[str] = []
-    for position in fetch_active_positions(mode=runtime.settings.mode):
-        if str(position.get("ticker", "")) != ticker:
-            continue
-        events = fetch_position_events(str(position["position_id"]))
-        if events and events[-1].get("event_type") == "open_submit_uncertain":
-            fingerprints.append(str(position["broker_fingerprint"]))
+    try:
+        active_positions = fetch_active_positions(mode=runtime.settings.mode)
+        for position in active_positions:
+            if str(position.get("ticker", "")) != ticker:
+                continue
+            events = fetch_position_events(str(position["position_id"]))
+            if events and events[-1].get("event_type") == "open_submit_uncertain":
+                fingerprints.append(str(position["broker_fingerprint"]))
+    except Exception as exc:
+        return {
+            "status": "anomaly",
+            "reason": "audit_lookup_failed",
+            "manual_intervention_required": True,
+            "audit_error": {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            },
+        }
 
     if not fingerprints:
         return None

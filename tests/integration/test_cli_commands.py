@@ -782,6 +782,63 @@ def test_trade_command_blocks_when_uncertain_open_is_unresolved(
     assert executor.open_calls == []
 
 
+def test_trade_command_fail_closes_when_audit_lookup_raises(monkeypatch) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+
+    class ExplodingAuditReader:
+        def fetch_active_managed_positions(self, *, mode: str) -> list[object]:
+            raise RuntimeError("audit unreadable")
+
+        def fetch_position_events(self, position_id: str) -> list[object]:
+            raise AssertionError("position events should not be fetched after audit read failure")
+
+    executor = FakeExecutor()
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=FakeDecisionService(
+                decision=SimpleNamespace(
+                    action="approve",
+                    ticker="AMD",
+                    strategy="bull_put_credit_spread",
+                    expiry="2026-04-30",
+                    short_strike=160,
+                    long_strike=155,
+                    limit_credit=1.10,
+                    reason="approved",
+                )
+            ),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=0),
+            risk_guard=FakeRiskGuard(allowed=True),
+            executor=executor,
+            audit_logger=ExplodingAuditReader(),
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "audit_error": {
+            "message": "audit unreadable",
+            "type": "RuntimeError",
+        },
+        "command": "trade",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "live_enabled": False,
+        "manual_intervention_required": True,
+        "mode": "paper",
+        "reason": "audit_lookup_failed",
+        "status": "anomaly",
+    }
+    assert executor.open_calls == []
+
+
 def test_trade_command_returns_no_candidates_without_fetching_account(monkeypatch) -> None:
     runner = CliRunner()
     scanner = FakeScanner([])
