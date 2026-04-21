@@ -509,6 +509,26 @@ def test_ibkr_market_data_client_uses_generic_metric_fallback_when_side_specific
     assert quotes[0].open_interest == 42
 
 
+def test_ibkr_market_data_client_materializes_rights_iterators_once() -> None:
+    ib_client = FakeMarketDataClient()
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+    )
+
+    quotes = client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=(right for right in ("P", "C")),
+        as_of=date(2026, 4, 20),
+    )
+
+    assert len(quotes) == 8
+    assert {quote.right for quote in quotes} == {"P", "C"}
+    assert len(ib_client.ticker_requests[-1]) == 8
+
+
 def test_ibkr_market_data_client_maps_account_summary_and_counts_open_option_positions() -> None:
     ib_client = FakeMarketDataClient()
     client = IbkrMarketDataClient(

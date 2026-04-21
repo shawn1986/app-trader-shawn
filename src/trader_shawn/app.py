@@ -805,50 +805,60 @@ def _record_uncertain_open_submission(
         audit_logger,
         "upsert_managed_position",
     )
+    audit_error: dict[str, str] | None = None
 
     if upsert_managed_position is not None:
-        recorded_at = datetime.now(UTC)
-        upsert_managed_position(
-            ManagedPositionRecord(
-                position_id=position_id,
-                ticker=spread.ticker,
-                strategy=spread.strategy,
-                expiry=spread.expiry,
-                short_strike=float(spread.short_strike),
-                long_strike=float(spread.long_strike),
-                quantity=quantity,
-                entry_credit=float(limit_credit),
-                entry_order_id=None,
-                mode=runtime.settings.mode,
-                status="opening",
-                opened_at=recorded_at,
-                broker_fingerprint=fingerprint,
-                decision_reason=f"opened by {command}",
-                risk_note="manual intervention required",
+        try:
+            recorded_at = datetime.now(UTC)
+            upsert_managed_position(
+                ManagedPositionRecord(
+                    position_id=position_id,
+                    ticker=spread.ticker,
+                    strategy=spread.strategy,
+                    expiry=spread.expiry,
+                    short_strike=float(spread.short_strike),
+                    long_strike=float(spread.long_strike),
+                    quantity=quantity,
+                    entry_credit=float(limit_credit),
+                    entry_order_id=None,
+                    mode=runtime.settings.mode,
+                    status="opening",
+                    opened_at=recorded_at,
+                    broker_fingerprint=fingerprint,
+                    decision_reason=f"opened by {command}",
+                    risk_note="manual intervention required",
+                )
             )
-        )
-        record_position_event = _resolve_runtime_method(
-            audit_logger,
-            "record_position_event",
-        )
-        if record_position_event is not None:
-            record_position_event(
-                position_id,
-                "open_submit_uncertain",
-                {
-                    "broker_fingerprint": fingerprint,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                },
-                created_at=recorded_at,
+            record_position_event = _resolve_runtime_method(
+                audit_logger,
+                "record_position_event",
             )
+            if record_position_event is not None:
+                record_position_event(
+                    position_id,
+                    "open_submit_uncertain",
+                    {
+                        "broker_fingerprint": fingerprint,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                    created_at=recorded_at,
+                )
+        except Exception as audit_exc:
+            audit_error = {
+                "type": type(audit_exc).__name__,
+                "message": str(audit_exc),
+            }
 
-    return {
+    result = {
         "status": "anomaly",
         "reason": "uncertain_submit_state",
         "fingerprints": [fingerprint],
         "manual_intervention_required": True,
     }
+    if audit_error is not None:
+        result["audit_error"] = audit_error
+    return result
 
 
 def _detect_unresolved_uncertain_open_submission(

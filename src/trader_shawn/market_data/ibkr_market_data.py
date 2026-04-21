@@ -99,6 +99,7 @@ class IbkrMarketDataClient:
             ),
             exchange=exchange,
         )
+        normalized_rights = _normalize_rights(rights)
         option_contracts = [
             ibkr.Option(
                 symbol=ticker,
@@ -115,7 +116,7 @@ class IbkrMarketDataClient:
                 max_dte=max_dte,
             )
             for strike in sorted(float(value) for value in option_chain.strikes)
-            for right in _normalize_rights(rights)
+            for right in normalized_rights
         ]
         if not option_contracts:
             return []

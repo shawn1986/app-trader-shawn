@@ -647,6 +647,61 @@ def test_trade_command_persists_uncertain_open_and_returns_anomaly(
     )
 
 
+def test_trade_command_preserves_uncertain_open_anomaly_when_audit_write_fails(
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+
+    class ExplodingAuditLogger:
+        def upsert_managed_position(self, record: object) -> None:
+            raise RuntimeError("sqlite busy")
+
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=FakeDecisionService(
+                decision=SimpleNamespace(
+                    action="approve",
+                    ticker="AMD",
+                    strategy="bull_put_credit_spread",
+                    expiry="2026-04-30",
+                    short_strike=160,
+                    long_strike=155,
+                    limit_credit=1.10,
+                    reason="approved",
+                )
+            ),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=0),
+            risk_guard=FakeRiskGuard(allowed=True),
+            executor=UncertainOpenExecutor(),
+            audit_logger=ExplodingAuditLogger(),
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "audit_error": {
+            "message": "sqlite busy",
+            "type": "RuntimeError",
+        },
+        "command": "trade",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "live_enabled": False,
+        "manual_intervention_required": True,
+        "mode": "paper",
+        "reason": "uncertain_submit_state",
+        "status": "anomaly",
+    }
+
+
 def test_trade_command_blocks_when_uncertain_open_is_unresolved(
     monkeypatch,
     tmp_path: Path,
