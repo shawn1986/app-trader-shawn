@@ -28,10 +28,10 @@ def test_pyproject_exposes_cli_entrypoint() -> None:
     }
 
 
-def test_pyproject_does_not_depend_on_pytest_pythonpath_injection() -> None:
+def test_pyproject_keeps_src_on_pytest_pythonpath_for_repo_root_runs() -> None:
     pyproject = load_pyproject()
 
-    assert "pythonpath" not in pyproject["tool"]["pytest"]["ini_options"]
+    assert pyproject["tool"]["pytest"]["ini_options"]["pythonpath"] == ["src"]
 
 
 def test_installed_console_entrypoint_resolves_to_app_main() -> None:
