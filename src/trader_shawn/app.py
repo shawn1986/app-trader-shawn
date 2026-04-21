@@ -888,11 +888,14 @@ def _detect_unresolved_uncertain_open_submission(
     *,
     ticker: str,
 ) -> dict[str, Any] | None:
-    return _detect_unresolved_uncertain_submission(
+    audit_state = _detect_unresolved_uncertain_submission(
         runtime,
         event_type="open_submit_uncertain",
         ticker=ticker,
     )
+    if audit_state is not None:
+        return audit_state
+    return _detect_dashboard_uncertain_open_submission(runtime, ticker=ticker)
 
 
 def _detect_pending_open_submission(
@@ -924,6 +927,46 @@ def _detect_unresolved_uncertain_submission(
         reason="uncertain_submit_state",
         treat_missing_events_as_match=False,
     )
+
+
+def _detect_dashboard_uncertain_open_submission(
+    runtime: CliRuntime,
+    *,
+    ticker: str,
+) -> dict[str, Any] | None:
+    state_path = getattr(runtime, "dashboard_state_path", None)
+    if state_path is None or not ticker:
+        return None
+
+    snapshot = read_dashboard_snapshot(state_path)
+    last_cycle = snapshot.get("last_cycle")
+    if not isinstance(last_cycle, dict):
+        return None
+    if last_cycle.get("status") != "anomaly":
+        return None
+    if last_cycle.get("reason") != "uncertain_submit_state":
+        return None
+    if last_cycle.get("manual_intervention_required") is not True:
+        return None
+
+    fingerprints = last_cycle.get("fingerprints")
+    if not isinstance(fingerprints, list):
+        return None
+
+    matched_fingerprints = [
+        fingerprint
+        for fingerprint in fingerprints
+        if isinstance(fingerprint, str) and _fingerprint_matches_ticker(fingerprint, ticker)
+    ]
+    if not matched_fingerprints:
+        return None
+
+    return {
+        "status": "anomaly",
+        "reason": "uncertain_submit_state",
+        "fingerprints": matched_fingerprints,
+        "manual_intervention_required": True,
+    }
 
 
 def _detect_active_position_event(
@@ -986,6 +1029,12 @@ def _detect_active_position_event(
         "fingerprints": sorted(set(fingerprints)),
         "manual_intervention_required": True,
     }
+
+
+def _fingerprint_matches_ticker(fingerprint: str, ticker: str) -> bool:
+    expected = str(ticker).strip().upper()
+    actual = fingerprint.split("|", 1)[0].strip().upper()
+    return bool(expected) and actual == expected
 
 
 def _entry_position_id(command: str, submission: dict[str, Any]) -> str:

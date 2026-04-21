@@ -193,6 +193,7 @@ def _runtime(
     risk_guard: FakeRiskGuard | None = None,
     executor: FakeExecutor | None = None,
     audit_logger: AuditLogger | None = None,
+    dashboard_state_path: Path | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         settings=_settings(),
@@ -205,7 +206,7 @@ def _runtime(
         risk_guard=risk_guard,
         executor=executor,
         audit_logger=audit_logger,
-        dashboard_state_path=None,
+        dashboard_state_path=dashboard_state_path,
     )
 
 
@@ -700,6 +701,108 @@ def test_trade_command_preserves_uncertain_open_anomaly_when_audit_write_fails(
         "reason": "uncertain_submit_state",
         "status": "anomaly",
     }
+
+
+def test_trade_command_blocks_future_entries_from_dashboard_when_uncertain_open_audit_write_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+    dashboard_state_path = (tmp_path / "runtime" / "dashboard.json").resolve()
+
+    class ExplodingAuditLogger:
+        def upsert_managed_position(self, record: object) -> None:
+            raise RuntimeError("sqlite busy")
+
+    first_executor = UncertainOpenExecutor()
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=FakeDecisionService(
+                decision=SimpleNamespace(
+                    action="approve",
+                    ticker="AMD",
+                    strategy="bull_put_credit_spread",
+                    expiry="2026-04-30",
+                    short_strike=160,
+                    long_strike=155,
+                    limit_credit=1.10,
+                    reason="approved",
+                )
+            ),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=0),
+            risk_guard=FakeRiskGuard(allowed=True),
+            executor=first_executor,
+            audit_logger=ExplodingAuditLogger(),
+            dashboard_state_path=dashboard_state_path,
+        ),
+        raising=False,
+    )
+
+    first_result = runner.invoke(cli, ["trade"])
+
+    assert first_result.exit_code == 0
+    assert json.loads(first_result.output) == {
+        "audit_error": {
+            "message": "sqlite busy",
+            "type": "RuntimeError",
+        },
+        "command": "trade",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "live_enabled": False,
+        "manual_intervention_required": True,
+        "mode": "paper",
+        "reason": "uncertain_submit_state",
+        "status": "anomaly",
+    }
+
+    second_executor = FakeExecutor()
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=FakeDecisionService(
+                decision=SimpleNamespace(
+                    action="approve",
+                    ticker="AMD",
+                    strategy="bull_put_credit_spread",
+                    expiry="2026-04-30",
+                    short_strike=160,
+                    long_strike=155,
+                    limit_credit=1.10,
+                    reason="approved",
+                )
+            ),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=0),
+            risk_guard=FakeRiskGuard(allowed=True),
+            executor=second_executor,
+            audit_logger=ExplodingAuditLogger(),
+            dashboard_state_path=dashboard_state_path,
+        ),
+        raising=False,
+    )
+
+    second_result = runner.invoke(cli, ["trade"])
+
+    assert second_result.exit_code == 0
+    assert json.loads(second_result.output) == {
+        "command": "trade",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "live_enabled": False,
+        "manual_intervention_required": True,
+        "mode": "paper",
+        "reason": "uncertain_submit_state",
+        "status": "anomaly",
+    }
+    assert second_executor.open_calls == []
 
 
 def test_trade_command_blocks_when_uncertain_open_is_unresolved(
