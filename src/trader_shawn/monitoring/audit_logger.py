@@ -269,13 +269,18 @@ class AuditLogger:
         event_type: str,
         payload: dict[str, Any],
         *,
-        created_at: datetime | None = None,
+        created_at: datetime | str | None = None,
     ) -> None:
         serialized_payload = self._serialize_json(
             payload,
             message="unsupported position event payload",
         )
-        event_created_at = (created_at or datetime.now(UTC)).isoformat()
+        if isinstance(created_at, datetime):
+            event_created_at = created_at.isoformat()
+        elif isinstance(created_at, str) and created_at:
+            event_created_at = created_at
+        else:
+            event_created_at = datetime.now(UTC).isoformat()
         with self._connect() as connection:
             connection.execute(
                 """
@@ -289,6 +294,33 @@ class AuditLogger:
                 (position_id, event_type, serialized_payload, event_created_at),
             )
             connection.commit()
+
+    def fetch_recent_position_events(self, limit: int = 10) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select
+                    position_id,
+                    event_type,
+                    payload_json,
+                    created_at
+                from position_events
+                order by created_at desc, id desc
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "position_id": row["position_id"],
+                "event_type": row["event_type"],
+                "payload_json": json.loads(row["payload_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
     def fetch_position_events(self, position_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:

@@ -1,0 +1,184 @@
+:root {
+    --bg: #070d14;
+    --panel: #101a26;
+    --line: #274158;
+    --text: #d7e6f5;
+    --warn: #ffb347;
+    --danger: #ff4f5e;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    color: var(--text);
+    background:
+        radial-gradient(circle at 20% 15%, #132436 0%, transparent 40%),
+        radial-gradient(circle at 80% 80%, #141f30 0%, transparent 45%),
+        linear-gradient(155deg, #050b12 0%, var(--bg) 55%, #0b1521 100%);
+}
+
+.war-room {
+    width: min(1200px, 96vw);
+    margin: 0 auto;
+    padding: 2rem 1rem;
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+    grid-template-areas:
+        "command threat"
+        "risk threat"
+        "positions threat";
+    gap: 1rem;
+}
+
+.panel {
+    background: linear-gradient(180deg, rgba(20, 32, 46, 0.95), rgba(13, 21, 32, 0.95));
+    border: 1px solid var(--line);
+    border-radius: 0.75rem;
+    padding: 1rem 1.25rem;
+    box-shadow: inset 0 0 0 1px rgba(73, 108, 138, 0.15);
+}
+
+.panel h2 {
+    margin: 0 0 0.5rem;
+    font-size: 1rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.panel p {
+    margin: 0;
+    color: rgba(215, 230, 245, 0.88);
+    line-height: 1.45;
+}
+
+.arm-controls {
+    margin-top: 1rem;
+    display: grid;
+    gap: 0.45rem;
+}
+
+.arm-controls label {
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(215, 230, 245, 0.75);
+}
+
+.arm-row {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.arm-row input {
+    flex: 1;
+    border-radius: 0.45rem;
+    border: 1px solid var(--line);
+    background: rgba(7, 13, 20, 0.95);
+    color: var(--text);
+    padding: 0.52rem 0.6rem;
+}
+
+.arm-row button,
+.command-grid button,
+.trade-confirm button {
+    border-radius: 0.45rem;
+    border: 1px solid rgba(96, 155, 209, 0.42);
+    color: var(--text);
+    background: linear-gradient(180deg, rgba(35, 72, 105, 0.55), rgba(18, 36, 53, 0.92));
+    padding: 0.5rem 0.8rem;
+    cursor: pointer;
+}
+
+.command-grid {
+    margin-top: 1rem;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+}
+
+.command-grid button[disabled] {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
+.trade-confirm {
+    margin-top: 1rem;
+    border: 1px solid rgba(255, 179, 71, 0.35);
+    border-radius: 0.55rem;
+    padding: 0.65rem 0.75rem;
+    background: rgba(39, 26, 12, 0.42);
+    display: grid;
+    gap: 0.55rem;
+}
+
+.trade-confirm p {
+    color: var(--warn);
+}
+
+.mission-heading {
+    margin-top: 1.2rem;
+}
+
+.mission-log {
+    margin: 0.5rem 0 0;
+    padding-left: 1.2rem;
+    display: grid;
+    gap: 0.4rem;
+}
+
+.mission-log li {
+    color: rgba(215, 230, 245, 0.85);
+}
+
+.command-status {
+    grid-area: command;
+}
+
+.risk-deck {
+    grid-area: risk;
+}
+
+.hot-positions {
+    grid-area: positions;
+}
+
+.threat-rail {
+    grid-area: threat;
+    border-color: rgba(255, 79, 94, 0.5);
+    box-shadow:
+        inset 0 0 0 1px rgba(255, 79, 94, 0.18),
+        0 0 0 1px rgba(255, 179, 71, 0.12);
+    background:
+        linear-gradient(180deg, rgba(255, 79, 94, 0.12), rgba(16, 26, 38, 0.92) 30%),
+        linear-gradient(180deg, rgba(20, 32, 46, 0.95), rgba(13, 21, 32, 0.95));
+}
+
+.threat-rail p {
+    color: var(--warn);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+body[data-threat="warning"] .threat-rail [data-threat-level] {
+    color: var(--warn);
+}
+
+body[data-threat="critical"] .threat-rail [data-threat-level] {
+    color: var(--danger);
+}
+
+@media (max-width: 900px) {
+    .war-room {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+            "command"
+            "risk"
+            "positions"
+            "threat";
+    }
+}

@@ -10,6 +10,7 @@ from typing import Any, Sequence
 from uuid import uuid4
 
 import click
+import uvicorn
 
 from trader_shawn.ai.claude_cli_adapter import ClaudeCliAdapter
 from trader_shawn.ai.codex_adapter import CodexAdapter
@@ -234,6 +235,20 @@ def dashboard_command(state_path: Path) -> None:
     click.echo(json.dumps(_dashboard_command(state_path), sort_keys=True))
 
 
+@cli.command("war-room")
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8787, show_default=True, type=int)
+def war_room_command(host: str, port: int) -> None:
+    if host.strip().lower() not in {"127.0.0.1", "localhost"}:
+        raise click.ClickException(
+            "war-room only supports loopback host binding (127.0.0.1 or localhost)"
+        )
+
+    from trader_shawn.war_room.web import create_war_room_app
+
+    uvicorn.run(create_war_room_app(), host=host, port=port)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     cli.main(
         args=list(argv) if argv is not None else None,
@@ -342,10 +357,26 @@ def _trade_cycle_command() -> dict[str, Any]:
     return _with_dashboard_error(result, _update_dashboard_snapshot(runtime, result))
 
 
+def run_cli_command_with_runtime(command: str, runtime: CliRuntime) -> dict[str, Any]:
+    if command == "scan":
+        return _scan_command_with_runtime(runtime)
+    if command == "decide":
+        return _decide_command_with_runtime(runtime)
+    if command == "trade":
+        return _trade_command_with_runtime(runtime)
+    if command == "manage":
+        return _manage_command_with_runtime(runtime)
+    raise ValueError(f"Unsupported command: {command}")
+
+
 def _scan_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
+    return _scan_command_with_runtime(runtime)
+
+
+def _scan_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
     candidates, candidate_error = _scan_candidates(runtime, command="scan")
     if candidate_error is not None:
         return candidate_error
@@ -361,7 +392,10 @@ def _decide_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
+    return _decide_command_with_runtime(runtime)
 
+
+def _decide_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
     candidates, candidate_error = _scan_candidates(runtime, command="decide")
     if candidate_error is not None:
         return candidate_error
@@ -389,6 +423,10 @@ def _trade_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
+    return _trade_command_with_runtime(runtime)
+
+
+def _trade_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
     result = _execute_entry_workflow("trade", runtime)
     return _with_dashboard_error(result, _update_dashboard_snapshot(runtime, result))
 
@@ -397,6 +435,10 @@ def _manage_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
+    return _manage_command_with_runtime(runtime)
+
+
+def _manage_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
 
     manager = getattr(runtime, "position_manager", None)
     manage_positions = _resolve_runtime_method(manager, "manage_positions")
