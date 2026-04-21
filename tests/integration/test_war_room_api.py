@@ -24,6 +24,16 @@ def test_snapshot_endpoint_returns_war_room_payload() -> None:
     assert response.json()["risk_deck"]["open_risk"] == 1200.0
 
 
+def test_arm_endpoint_rejects_invalid_phrase() -> None:
+    app = create_war_room_app(snapshot_provider=lambda: {})
+    client = TestClient(app)
+
+    response = client.post("/api/war-room/arm", json={"phrase": "NOPE"})
+
+    assert response.status_code == 403
+    assert response.json()["reason"] == "invalid_arm_phrase"
+
+
 def test_command_endpoint_requires_armed_session() -> None:
     app = create_war_room_app(
         snapshot_provider=lambda: {},

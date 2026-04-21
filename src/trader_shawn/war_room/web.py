@@ -48,7 +48,12 @@ def create_war_room_app(
         if command_name == "trade" and payload.get("confirmed") is not True:
             return JSONResponse({"reason": "trade_confirmation_required"}, status_code=409)
 
-        return JSONResponse(runner(command_name, payload))
+        try:
+            result = runner(command_name, payload)
+        except ValueError:
+            return JSONResponse({"reason": "unsupported_command"}, status_code=404)
+
+        return JSONResponse(result)
 
     return app
 
