@@ -228,7 +228,7 @@ class IbkrMarketDataClient:
         return round(short_close_ask - long_close_bid, 2)
 
     def count_open_option_positions(self, *, symbol: str | None = None) -> int:
-        count = 0
+        count = 0.0
         for position in self.ensure_connected().positions():
             contract = getattr(position, "contract", None)
             if contract is None:
@@ -237,9 +237,10 @@ class IbkrMarketDataClient:
                 continue
             if symbol is not None and str(getattr(contract, "symbol", "")) != symbol:
                 continue
-            if float(getattr(position, "position", 0)) == 0:
+            quantity = float(getattr(position, "position", 0))
+            if quantity == 0:
                 continue
-            count += 1
+            count += abs(quantity)
         return math.ceil(count / 2)
 
     def count_open_option_symbols(self) -> int:

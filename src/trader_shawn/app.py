@@ -295,16 +295,18 @@ def _error_result(*, status: str, reason: str, exc: Exception) -> dict[str, str]
 def build_cli_runtime() -> CliRuntime:
     config_dir = _default_config_dir()
     settings = load_settings(config_dir)
+    market_data_client_id = settings.ibkr.client_id
+    execution_client_id = market_data_client_id + 1
     market_data_client = IbkrMarketDataClient(
         host=settings.ibkr.host,
         port=settings.ibkr.port,
-        client_id=settings.ibkr.client_id,
+        client_id=market_data_client_id,
     )
     earnings_calendar = EarningsCalendar(settings.events)
     executor = IbkrExecutor(
         host=settings.ibkr.host,
         port=settings.ibkr.port,
-        client_id=settings.ibkr.client_id,
+        client_id=execution_client_id,
     )
     audit_logger = AuditLogger(settings.audit_db_path)
     return CliRuntime(

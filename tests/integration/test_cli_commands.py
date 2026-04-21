@@ -633,6 +633,8 @@ def test_build_cli_runtime_wires_position_manager(tmp_path: Path, monkeypatch) -
     assert runtime.position_manager is position_manager
     assert captured["audit_db_path"] == settings.audit_db_path
     assert captured["events"] == settings.events
+    assert captured["market_data_kwargs"]["client_id"] == settings.ibkr.client_id
+    assert captured["executor_kwargs"]["client_id"] == settings.ibkr.client_id + 1
     assert captured["position_manager_kwargs"] == {
         "audit_logger": builder["audit_logger"],
         "market_data": builder["market_data"],

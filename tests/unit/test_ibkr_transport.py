@@ -533,6 +533,44 @@ def test_ibkr_market_data_client_maps_account_summary_and_counts_open_option_pos
     assert client.count_open_option_positions() == 1
 
 
+def test_ibkr_market_data_client_counts_scaled_spread_quantities_per_symbol() -> None:
+    class ScaledPositionClient(FakeMarketDataClient):
+        def positions(self) -> list[object]:
+            return [
+                SimpleNamespace(
+                    account="DU123",
+                    position=-3,
+                    contract=SimpleNamespace(
+                        secType="OPT",
+                        symbol="AMD",
+                        lastTradeDateOrContractMonth="20260430",
+                        right="P",
+                        strike=160.0,
+                        conId=80160,
+                    ),
+                ),
+                SimpleNamespace(
+                    account="DU123",
+                    position=3,
+                    contract=SimpleNamespace(
+                        secType="OPT",
+                        symbol="AMD",
+                        lastTradeDateOrContractMonth="20260430",
+                        right="P",
+                        strike=155.0,
+                        conId=80155,
+                    ),
+                ),
+            ]
+
+    client = IbkrMarketDataClient(
+        client=ScaledPositionClient(),
+        ibkr_module=FakeIbModule(),
+    )
+
+    assert client.count_open_option_positions(symbol="AMD") == 3
+
+
 def test_ibkr_market_data_client_lists_live_option_positions_for_manage() -> None:
     ib_client = FakeMarketDataClient()
     client = IbkrMarketDataClient(client=ib_client, ibkr_module=FakeIbModule())
