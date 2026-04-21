@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from trader_shawn.domain.enums import PositionSide
 from trader_shawn.domain.models import BrokerOptionPosition, PositionSnapshot
 from trader_shawn.execution.ibkr_executor import OrderNotSubmittedError
 from trader_shawn.events.earnings_calendar import EarningsCalendar
+
+_OPENING_STALE_AFTER = timedelta(minutes=15)
 
 
 class PositionManager:
@@ -43,7 +45,61 @@ class PositionManager:
             return reconciliation
 
         matched_positions = list(reconciliation["matched_positions"])
+        pending_openings = list(reconciliation["pending_openings"])
+        opening_to_open = list(reconciliation["opening_to_open"])
         closing_to_close = list(reconciliation["closing_to_close"])
+        stale_openings = _stale_opening_positions(
+            pending_openings,
+            now=datetime.now(UTC),
+        )
+        if stale_openings:
+            self._finalize_missing_closing_positions(closing_to_close)
+            fingerprints: set[str] = set()
+            for managed_position in stale_openings:
+                recorded_at = datetime.now(UTC)
+                fingerprints.add(str(managed_position["broker_fingerprint"]))
+                claimed = self._audit_logger.update_managed_position_if_status(
+                    managed_position["position_id"],
+                    expected_status="opening",
+                    status="orphaned",
+                    last_evaluated_at=recorded_at.isoformat(),
+                )
+                if not claimed:
+                    continue
+                self._audit_logger.record_position_event(
+                    managed_position["position_id"],
+                    "open_submit_stale",
+                    {
+                        "broker_fingerprint": managed_position["broker_fingerprint"],
+                    },
+                    created_at=recorded_at,
+                )
+            return {
+                "status": "anomaly",
+                "reason": "stale_open_submission",
+                "fingerprints": sorted(fingerprints),
+                "manual_intervention_required": True,
+            }
+        for managed_position in opening_to_open:
+            recorded_at = datetime.now(UTC)
+            claimed = self._audit_logger.update_managed_position_if_status(
+                managed_position["position_id"],
+                expected_status="opening",
+                status="open",
+                last_evaluated_at=recorded_at.isoformat(),
+            )
+            if claimed:
+                self._audit_logger.record_position_event(
+                    managed_position["position_id"],
+                    "opened",
+                    {
+                        "broker_fingerprint": managed_position["broker_fingerprint"],
+                    },
+                    created_at=recorded_at,
+                )
+            promoted_position = dict(managed_position)
+            promoted_position["status"] = "open"
+            matched_positions.append(promoted_position)
         staged_evaluations: list[dict[str, Any]] = []
         for managed_position in matched_positions:
             snapshot = self._build_snapshot(managed_position)
@@ -323,6 +379,8 @@ def _reconcile_positions(
 
     available_legs = [_broker_leg_key(position) for position in broker_positions]
     matched_positions: list[dict[str, Any]] = []
+    pending_openings: list[dict[str, Any]] = []
+    opening_to_open: list[dict[str, Any]] = []
     closing_to_close: list[dict[str, Any]] = []
     missing_fingerprints: list[str] = []
     unknown_fingerprints: set[str] = set()
@@ -348,10 +406,16 @@ def _reconcile_positions(
             if managed_position["status"] == "closing":
                 closing_to_close.append(managed_position)
                 continue
+            if managed_position["status"] == "opening":
+                pending_openings.append(managed_position)
+                continue
             missing_fingerprints.append(identity[0])
             continue
 
         _remove_matched_legs(available_legs, leg_indexes)
+        if managed_position["status"] == "opening":
+            opening_to_open.append(managed_position)
+            continue
         matched_positions.append(managed_position)
 
     leftover_fingerprints = _leftover_broker_fingerprints(available_legs)
@@ -377,6 +441,8 @@ def _reconcile_positions(
     return {
         "status": "ok",
         "matched_positions": matched_positions,
+        "pending_openings": pending_openings,
+        "opening_to_open": opening_to_open,
         "closing_to_close": closing_to_close,
     }
 
@@ -387,6 +453,38 @@ def _anomaly_result(*, reason: str, fingerprints: list[str]) -> dict[str, object
         "reason": reason,
         "fingerprints": fingerprints,
     }
+
+
+def _stale_opening_positions(
+    managed_positions: list[dict[str, Any]],
+    *,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    stale: list[dict[str, Any]] = []
+    for managed_position in managed_positions:
+        opened_at = _parse_managed_datetime(managed_position.get("opened_at"))
+        if opened_at is None:
+            stale.append(managed_position)
+            continue
+        if now - opened_at >= _OPENING_STALE_AFTER:
+            stale.append(managed_position)
+    return stale
+
+
+def _parse_managed_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _managed_identity(

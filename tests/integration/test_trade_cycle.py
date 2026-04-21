@@ -11,6 +11,7 @@ import trader_shawn.app as app_module
 from trader_shawn.app import cli, run_trade_cycle
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread
 from trader_shawn.execution.ibkr_executor import IbkrExecutor
+from trader_shawn.monitoring.audit_logger import AuditLogger
 from trader_shawn.monitoring.dashboard_api import (
     build_dashboard_snapshot,
     read_dashboard_snapshot,
@@ -365,6 +366,7 @@ def _runtime(
     position_service: FakePositionService | None = None,
     risk_guard: object | None = None,
     executor: object | None = None,
+    audit_logger: AuditLogger | None = None,
     dashboard_state_path: Path | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -376,6 +378,7 @@ def _runtime(
         position_service=position_service,
         risk_guard=risk_guard,
         executor=executor,
+        audit_logger=audit_logger,
         dashboard_state_path=dashboard_state_path,
     )
 
@@ -527,6 +530,39 @@ def test_trade_cycle_command_preserves_ibkr_submission_shape_in_dashboard(
         },
         "error": None,
     }
+
+
+def test_trade_cycle_command_persists_submitted_open_position(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+    audit_logger = AuditLogger(tmp_path / "audit.db")
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=StubDecisionService(limit_credit=1.10),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=1),
+            risk_guard=StubRiskGuard(allowed=True),
+            executor=IbkrShapeExecutor(),
+            audit_logger=audit_logger,
+            dashboard_state_path=tmp_path / "dashboard.json",
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade-cycle"])
+
+    assert result.exit_code == 0
+    positions = audit_logger.fetch_active_managed_positions(mode="paper")
+
+    assert len(positions) == 1
+    assert positions[0]["ticker"] == "AMD"
+    assert positions[0]["status"] == "opening"
+    assert positions[0]["entry_order_id"] == 321
+    assert positions[0]["entry_credit"] == 1.1
+    assert positions[0]["broker_fingerprint"] == "AMD|2026-04-30|P|160.0|155.0|1"
 
 
 def test_trade_cycle_command_reports_dashboard_update_failure(
@@ -1072,6 +1108,27 @@ def test_update_dashboard_state_preserves_manage_anomaly_fields(tmp_path: Path) 
         "ticker": "AMD",
         "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
         "manual_intervention_required": True,
+    }
+
+    written = update_dashboard_state(state_path, last_cycle=last_cycle)
+    loaded = read_dashboard_snapshot(state_path)
+
+    assert written == loaded == {
+        "status": "updated",
+        "last_cycle": last_cycle,
+        "error": None,
+    }
+
+
+def test_update_dashboard_state_preserves_audit_error(tmp_path: Path) -> None:
+    state_path = tmp_path / "dashboard.json"
+    last_cycle = {
+        "status": "submitted",
+        "payload": {"symbol": "AMD"},
+        "audit_error": {
+            "type": "RuntimeError",
+            "message": "sqlite busy",
+        },
     }
 
     written = update_dashboard_state(state_path, last_cycle=last_cycle)

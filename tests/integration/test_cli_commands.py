@@ -9,6 +9,7 @@ from click.testing import CliRunner
 import trader_shawn.app as app_module
 from trader_shawn.app import cli
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread
+from trader_shawn.monitoring.audit_logger import AuditLogger
 
 
 def _spread(
@@ -179,6 +180,7 @@ def _runtime(
     position_manager: object | None = None,
     risk_guard: FakeRiskGuard | None = None,
     executor: FakeExecutor | None = None,
+    audit_logger: AuditLogger | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         settings=_settings(),
@@ -190,6 +192,7 @@ def _runtime(
         position_manager=position_manager,
         risk_guard=risk_guard,
         executor=executor,
+        audit_logger=audit_logger,
         dashboard_state_path=None,
     )
 
@@ -469,6 +472,112 @@ def test_trade_command_counts_positions_for_approved_candidate_ticker(monkeypatc
     assert risk_guard.calls[0][0] is approved_candidate
     assert risk_guard.calls[0][2] == 2
     assert executor.open_calls == [(approved_candidate, 1.1, 1)]
+
+
+def test_trade_command_persists_submitted_open_position(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+    audit_logger = AuditLogger(tmp_path / "audit.db")
+    scanner = FakeScanner([candidate])
+    account_service = FakeAccountService(_account())
+    position_service = FakePositionService(open_symbol_count=1)
+    risk_guard = FakeRiskGuard(allowed=True)
+    executor = FakeExecutor()
+    decision_service = FakeDecisionService(
+        decision=SimpleNamespace(
+            action="approve",
+            ticker="AMD",
+            strategy="bull_put_credit_spread",
+            expiry="2026-04-30",
+            short_strike=160,
+            long_strike=155,
+            limit_credit=1.10,
+            reason="approved",
+        )
+    )
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=scanner,
+            decision_service=decision_service,
+            account_service=account_service,
+            position_service=position_service,
+            risk_guard=risk_guard,
+            executor=executor,
+            audit_logger=audit_logger,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade"])
+
+    assert result.exit_code == 0
+    positions = audit_logger.fetch_active_managed_positions(mode="paper")
+
+    assert len(positions) == 1
+    assert positions[0]["ticker"] == "AMD"
+    assert positions[0]["status"] == "opening"
+    assert positions[0]["entry_credit"] == 1.1
+    assert positions[0]["broker_fingerprint"] == "AMD|2026-04-30|P|160.0|155.0|1"
+
+
+def test_trade_command_reports_audit_error_without_masking_submitted_order(monkeypatch) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+
+    class ExplodingAuditLogger:
+        def upsert_managed_position(self, record: object) -> None:
+            raise RuntimeError("sqlite busy")
+
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=FakeDecisionService(
+                decision=SimpleNamespace(
+                    action="approve",
+                    ticker="AMD",
+                    strategy="bull_put_credit_spread",
+                    expiry="2026-04-30",
+                    short_strike=160,
+                    long_strike=155,
+                    limit_credit=1.10,
+                    reason="approved",
+                )
+            ),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=1),
+            risk_guard=FakeRiskGuard(allowed=True),
+            executor=FakeExecutor(),
+            audit_logger=ExplodingAuditLogger(),
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "audit_error": {
+            "type": "RuntimeError",
+            "message": "sqlite busy",
+        },
+        "command": "trade",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "live_enabled": False,
+        "mode": "paper",
+        "payload": {
+            "expiry": "2026-04-30",
+            "limit_credit": 1.1,
+            "long_strike": 155,
+            "quantity": 1,
+            "short_strike": 160,
+            "symbol": "AMD",
+        },
+        "status": "submitted",
+    }
 
 
 def test_trade_command_returns_no_candidates_without_fetching_account(monkeypatch) -> None:

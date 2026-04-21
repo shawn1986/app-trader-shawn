@@ -104,6 +104,25 @@ def test_fetch_active_managed_positions_only_returns_open_and_closing(
 
     logger.upsert_managed_position(
         ManagedPositionRecord(
+            position_id="pos-opening",
+            ticker="AMD",
+            strategy="bull_put_credit_spread",
+            expiry="2026-04-30",
+            short_strike=160.0,
+            long_strike=155.0,
+            quantity=1,
+            entry_credit=1.05,
+            entry_order_id=320,
+            mode="paper",
+            status="opening",
+            opened_at=datetime(2026, 4, 20, 9, 30, tzinfo=UTC),
+            broker_fingerprint="AMD|2026-04-30|P|160.0|155.0|0",
+            decision_reason="open submitted",
+            risk_note="initial",
+        )
+    )
+    logger.upsert_managed_position(
+        ManagedPositionRecord(
             position_id="pos-open",
             ticker="AMD",
             strategy="bull_put_credit_spread",
@@ -174,11 +193,12 @@ def test_fetch_active_managed_positions_only_returns_open_and_closing(
     positions = logger.fetch_active_managed_positions(mode="paper")
 
     assert [position["position_id"] for position in positions] == [
+        "pos-opening",
         "pos-open",
         "pos-closing",
     ]
-    assert positions[0]["opened_at"] == "2026-04-20T09:31:00+00:00"
-    assert positions[0]["last_evaluated_at"] == "2026-04-20T10:00:00+00:00"
+    assert positions[1]["opened_at"] == "2026-04-20T09:31:00+00:00"
+    assert positions[1]["last_evaluated_at"] == "2026-04-20T10:00:00+00:00"
 
 
 def test_audit_logger_closes_sqlite_connections(
@@ -905,6 +925,132 @@ def test_manage_positions_fails_closed_on_unknown_broker_option_position(
 
     assert result["status"] == "anomaly"
     assert result["reason"] == "unknown_broker_position"
+
+
+def test_manage_positions_promotes_opening_position_once_broker_legs_exist(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-opening",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "opening",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "open submitted",
+            "risk_note": "",
+        }
+    )
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=1,
+                    short_strike=155.0,
+                    broker_position_id="80155",
+                ),
+            ],
+            spread_debit=0.90,
+            spot_price=171.0,
+        ),
+        executor=FakeManageExecutor(),
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    assert result == {
+        "status": "ok",
+        "managed_count": 1,
+    }
+    persisted = logger.fetch_active_managed_positions(mode="paper")[0]
+    assert persisted["status"] == "open"
+    events = logger.fetch_position_events("pos-opening")
+    assert events[-1]["event_type"] == "opened"
+
+
+def test_manage_positions_marks_stale_opening_position_as_orphaned(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    logger.upsert_managed_position(
+        {
+            "position_id": "pos-opening",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "opening",
+            "opened_at": "2000-01-01T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "open submitted",
+            "risk_note": "",
+        }
+    )
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(option_positions=[]),
+        executor=FakeManageExecutor(),
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    assert result == {
+        "status": "anomaly",
+        "reason": "stale_open_submission",
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "manual_intervention_required": True,
+    }
+    assert logger.fetch_active_managed_positions(mode="paper") == []
+    events = logger.fetch_position_events("pos-opening")
+    assert events[-1]["event_type"] == "open_submit_stale"
 
 
 def test_manage_positions_submits_close_for_take_profit(tmp_path: Path) -> None:

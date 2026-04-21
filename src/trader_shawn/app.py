@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 import json
 import math
 from pathlib import Path
 from typing import Any, Sequence
+from uuid import uuid4
 
 import click
 
@@ -15,7 +16,7 @@ from trader_shawn.ai.codex_adapter import CodexAdapter
 from trader_shawn.ai.service import AiDecisionService
 from trader_shawn.candidate_builder.credit_spread_builder import build_candidates
 from trader_shawn.domain.enums import DecisionAction
-from trader_shawn.domain.models import AccountSnapshot, CandidateSpread
+from trader_shawn.domain.models import AccountSnapshot, CandidateSpread, ManagedPositionRecord
 from trader_shawn.events.earnings_calendar import EarningsCalendar
 from trader_shawn.execution.ibkr_executor import IbkrExecutor
 from trader_shawn.market_data.ibkr_market_data import IbkrMarketDataClient
@@ -37,6 +38,7 @@ class CliRuntime:
     risk_guard: Any | None = None
     position_service: Any | None = None
     position_manager: Any | None = None
+    audit_logger: Any | None = None
     dashboard_state_path: Path | None = None
 
 
@@ -325,6 +327,7 @@ def build_cli_runtime() -> CliRuntime:
             risk_settings=settings.risk,
             mode=settings.mode,
         ),
+        audit_logger=audit_logger,
         dashboard_state_path=(config_dir.parent / "runtime" / "dashboard.json").resolve(),
     )
 
@@ -549,6 +552,19 @@ def _execute_entry_workflow(command: str, runtime: CliRuntime) -> dict[str, Any]
                     limit_credit=limit_credit,
                     quantity=1,
                 )
+                audit_error = _persist_submitted_open_position(
+                    runtime,
+                    command=command,
+                    spread=matched_spread,
+                    limit_credit=limit_credit,
+                    quantity=1,
+                    submission=result,
+                )
+                if audit_error is not None:
+                    result = {
+                        **result,
+                        "audit_error": audit_error,
+                    }
             except Exception as exc:
                 result = _error_result(
                     status="executor_error",
@@ -679,6 +695,110 @@ def _count_open_symbol_positions(
             reason="open_position_count_failed",
             exc=exc,
         )
+
+
+def _persist_submitted_open_position(
+    runtime: CliRuntime,
+    *,
+    command: str,
+    spread: CandidateSpread,
+    limit_credit: float,
+    quantity: int,
+    submission: dict[str, Any],
+) -> dict[str, str] | None:
+    if submission.get("status") != "submitted":
+        return None
+
+    audit_logger = getattr(runtime, "audit_logger", None)
+    upsert_managed_position = _resolve_runtime_method(
+        audit_logger,
+        "upsert_managed_position",
+    )
+    if upsert_managed_position is None:
+        return None
+
+    try:
+        opened_at = datetime.now(UTC)
+        position_id = _entry_position_id(command, submission)
+        broker_fingerprint = str(
+            submission.get("broker_fingerprint")
+            or _entry_broker_fingerprint(spread, quantity=quantity)
+        )
+        upsert_managed_position(
+            ManagedPositionRecord(
+                position_id=position_id,
+                ticker=spread.ticker,
+                strategy=spread.strategy,
+                expiry=spread.expiry,
+                short_strike=float(spread.short_strike),
+                long_strike=float(spread.long_strike),
+                quantity=quantity,
+                entry_credit=float(limit_credit),
+                entry_order_id=_entry_order_id(submission),
+                mode=runtime.settings.mode,
+                status="opening",
+                opened_at=opened_at,
+                broker_fingerprint=broker_fingerprint,
+                decision_reason=f"opened by {command}",
+                risk_note="",
+            )
+        )
+
+        record_position_event = _resolve_runtime_method(
+            audit_logger,
+            "record_position_event",
+        )
+        if record_position_event is None:
+            return None
+
+        record_position_event(
+            position_id,
+            "open_submitted",
+            {
+                "command": command,
+                "entry_order_id": _entry_order_id(submission),
+                "broker_fingerprint": broker_fingerprint,
+            },
+            created_at=opened_at,
+        )
+    except Exception as exc:
+        return {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
+    return None
+
+
+def _entry_position_id(command: str, submission: dict[str, Any]) -> str:
+    order_id = _entry_order_id(submission)
+    if order_id is not None:
+        return f"{command}-{order_id}"
+    return f"{command}-{uuid4().hex}"
+
+
+def _entry_order_id(submission: dict[str, Any]) -> int | None:
+    order_id = submission.get("order_id")
+    if order_id in (None, ""):
+        return None
+    return int(order_id)
+
+
+def _entry_broker_fingerprint(spread: CandidateSpread, *, quantity: int) -> str:
+    return (
+        f"{spread.ticker}|{spread.expiry}|"
+        f"{_entry_option_right(spread.strategy)}|"
+        f"{float(spread.short_strike)}|{float(spread.long_strike)}|"
+        f"{int(quantity)}"
+    )
+
+
+def _entry_option_right(strategy: str) -> str:
+    normalized = strategy.lower()
+    if normalized == "bull_put_credit_spread":
+        return "P"
+    if normalized == "bear_call_credit_spread":
+        return "C"
+    raise ValueError(f"unsupported credit spread strategy: {strategy}")
 
 
 def _resolve_runtime_method(service: Any, *names: str) -> Any | None:

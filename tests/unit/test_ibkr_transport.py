@@ -156,21 +156,21 @@ class FakeMarketDataClient:
                 ask = 0.84
                 last = 0.78
             override = self.quote_overrides.get((right, strike), {})
-            tickers.append(
-                SimpleNamespace(
-                    contract=contract,
-                    bid=override.get("bid", bid),
-                    ask=override.get("ask", ask),
-                    last=override.get("last", last),
-                    close=1.15,
-                    bidGreeks=SimpleNamespace(delta=-0.21),
-                    modelGreeks=None,
-                    putVolume=140,
-                    callVolume=75,
-                    putOpenInterest=610,
-                    callOpenInterest=320,
-                )
-            )
+            ticker_fields = {
+                "contract": contract,
+                "bid": bid,
+                "ask": ask,
+                "last": last,
+                "close": 1.15,
+                "bidGreeks": SimpleNamespace(delta=-0.21),
+                "modelGreeks": None,
+                "putVolume": 140,
+                "callVolume": 75,
+                "putOpenInterest": 610,
+                "callOpenInterest": 320,
+            }
+            ticker_fields.update(override)
+            tickers.append(SimpleNamespace(**ticker_fields))
         return tickers
 
     def reqSecDefOptParams(
@@ -453,6 +453,60 @@ def test_ibkr_market_data_client_fetches_bounded_option_snapshots_for_runtime_wi
         "20260508",
         "20260508",
     ]
+
+
+def test_ibkr_market_data_client_treats_invalid_option_metrics_as_zero() -> None:
+    ib_client = FakeMarketDataClient(
+        quote_overrides={
+            ("P", 95.0): {
+                "putVolume": math.nan,
+                "putOpenInterest": "12.5",
+            }
+        }
+    )
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+    )
+
+    quotes = client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P",),
+        as_of=date(2026, 4, 20),
+    )
+
+    assert quotes[0].volume == 0
+    assert quotes[0].open_interest == 0
+
+
+def test_ibkr_market_data_client_uses_generic_metric_fallback_when_side_specific_metric_is_invalid() -> None:
+    ib_client = FakeMarketDataClient(
+        quote_overrides={
+            ("P", 95.0): {
+                "putVolume": math.nan,
+                "volume": 17,
+                "putOpenInterest": "12.5",
+                "openInterest": 42,
+            }
+        }
+    )
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+    )
+
+    quotes = client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P",),
+        as_of=date(2026, 4, 20),
+    )
+
+    assert quotes[0].volume == 17
+    assert quotes[0].open_interest == 42
 
 
 def test_ibkr_market_data_client_maps_account_summary_and_counts_open_option_positions() -> None:

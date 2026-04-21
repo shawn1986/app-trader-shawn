@@ -115,6 +115,10 @@ def _normalize_last_cycle(last_cycle: Any) -> dict[str, Any]:
         except TypeError:
             normalized[key] = {}
 
+    audit_error = _normalize_error(last_cycle.get("audit_error"))
+    if audit_error is not None:
+        normalized["audit_error"] = audit_error
+
     legs = last_cycle.get("legs")
     if isinstance(legs, list):
         try:

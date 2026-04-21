@@ -256,7 +256,7 @@ class AuditLogger:
                 f"""
                 select {", ".join(self._MANAGED_POSITION_COLUMNS)}
                 from managed_positions
-                where mode = ? and status in ('open', 'closing')
+                where mode = ? and status in ('opening', 'open', 'closing')
                 order by opened_at asc, position_id asc
                 """,
                 (mode,),

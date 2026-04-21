@@ -436,7 +436,9 @@ def _extract_option_metric(snapshot: Any, right: str, metric: str) -> int:
     for name in candidate_names:
         value = getattr(snapshot, name, None)
         if value not in (None, ""):
-            return int(value)
+            parsed = _try_optional_int(value)
+            if parsed is not None:
+                return parsed
     return 0
 
 
@@ -483,6 +485,17 @@ def _optional_float(value: object) -> float | None:
 
 
 def _optional_int(value: object) -> int:
+    parsed = _try_optional_int(value)
+    return 0 if parsed is None else parsed
+
+
+def _try_optional_int(value: object) -> int | None:
     if value is None or value == "":
-        return 0
-    return int(value)
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or not parsed.is_integer():
+        return None
+    return int(parsed)
