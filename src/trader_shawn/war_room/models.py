@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-ThreatLevel = Literal["normal", "warning", "critical"]
+ThreatLevel = Literal["nominal", "warning", "critical"]
 BrokerState = Literal["healthy", "degraded"]
 Freshness = Literal["fresh", "stale", "unknown"]
 

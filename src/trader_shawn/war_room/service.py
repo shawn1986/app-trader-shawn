@@ -144,7 +144,7 @@ def _derive_threat_level(
         return "warning"
     if any(_is_uncertain_event(position.latest_event_type) for position in hot_positions):
         return "warning"
-    return "normal"
+    return "nominal"
 
 
 def _hot_position_sort_key(position: HotPosition) -> tuple[int, int, str]:
