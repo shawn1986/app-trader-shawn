@@ -85,3 +85,8 @@ def test_parse_decision_accepts_bear_call_credit_spread_with_ascending_strikes()
     assert decision.strategy == "bear_call_credit_spread"
     assert decision.short_strike == 125.0
     assert decision.long_strike == 130.0
+
+
+def test_parse_decision_rejects_unknown_approval_strategy() -> None:
+    with pytest.raises(ValueError, match="unsupported approval strategy"):
+        parse_decision(_approval_payload(strategy="bullput"))

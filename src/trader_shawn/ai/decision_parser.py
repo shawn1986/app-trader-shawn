@@ -19,6 +19,11 @@ REQUIRED_APPROVAL_FIELDS = (
     "risk_note",
 )
 
+SUPPORTED_APPROVAL_STRATEGIES = {
+    "bull_put_credit_spread",
+    "bear_call_credit_spread",
+}
+
 
 @dataclass(slots=True)
 class ParsedDecision:
@@ -75,6 +80,8 @@ def _validate_approval_fields(
     confidence = _require_finite_approval_number(confidence, "confidence")
 
     normalized_strategy = strategy.lower()
+    if normalized_strategy not in SUPPORTED_APPROVAL_STRATEGIES:
+        raise ValueError("unsupported approval strategy")
     if normalized_strategy == "bull_put_credit_spread" and short_strike <= long_strike:
         raise ValueError("invalid approval field: short_strike must be greater than long_strike")
     if normalized_strategy == "bear_call_credit_spread" and short_strike >= long_strike:
