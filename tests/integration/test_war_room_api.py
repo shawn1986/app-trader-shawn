@@ -1,8 +1,10 @@
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+import trader_shawn.war_room.web as web_module
 from trader_shawn.monitoring.audit_logger import AuditLogger
 from trader_shawn.war_room.web import create_war_room_app
 from trader_shawn.war_room.web import create_default_snapshot_provider
@@ -166,6 +168,67 @@ def test_snapshot_endpoint_uses_default_provider_with_runtime_sources(
     assert payload["mission_log"][0]["event_type"] == "close_submit_uncertain"
 
 
+def test_default_app_uses_one_runtime_for_snapshot_and_default_commands(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    dashboard_path = tmp_path / "dashboard.json"
+    dashboard_path.write_text(
+        '{"status":"idle","last_cycle":{},"error":null}',
+        encoding="utf-8",
+    )
+    calls = {"count": 0}
+
+    class StubScanner:
+        def scan_candidates(self, symbols: list[str]) -> list[object]:
+            _ = symbols
+            return []
+
+    class StubAccountService:
+        def fetch_account_snapshot(self) -> dict[str, float]:
+            return {
+                "net_liquidation": 50_000.0,
+                "unrealized_pnl": 0.0,
+                "open_risk": 0.0,
+                "new_positions_today": 0,
+            }
+
+    runtime = SimpleNamespace(
+        config_dir=tmp_path / "config",
+        dashboard_state_path=dashboard_path,
+        settings=SimpleNamespace(
+            audit_db_path=tmp_path / "audit.db",
+            mode="paper",
+            live_enabled=False,
+            symbols=["AMD"],
+        ),
+        scanner=StubScanner(),
+        account_service=StubAccountService(),
+    )
+
+    def _build_runtime():
+        calls["count"] += 1
+        return runtime
+
+    monkeypatch.setattr("trader_shawn.war_room.web.build_cli_runtime", _build_runtime)
+    monkeypatch.setattr("trader_shawn.app.build_cli_runtime", _build_runtime)
+
+    app = create_war_room_app()
+    client = TestClient(app)
+
+    snapshot_response = client.get("/api/war-room/snapshot")
+    assert snapshot_response.status_code == 200
+
+    arm_response = client.post("/api/war-room/arm", json={"phrase": "ARM"})
+    assert arm_response.status_code == 204
+
+    command_response = client.post("/api/war-room/commands/scan", json={})
+    assert command_response.status_code == 200
+    assert command_response.json()["status"] == "ok"
+
+    assert calls["count"] == 1
+
+
 def test_snapshot_threat_uses_active_position_latest_events_not_truncated_mission_log(
     tmp_path: Path,
     monkeypatch,
@@ -311,3 +374,164 @@ def test_create_war_room_app_retries_lazy_default_provider_creation_after_failur
     assert second.status_code == 200
     assert second.json()["threat_level"] == "nominal"
     assert attempts["count"] == 2
+
+
+def test_default_command_path_returns_structured_config_error_on_runtime_init_failure(
+    monkeypatch,
+) -> None:
+    def _boom_runtime():
+        raise RuntimeError("broken config")
+
+    monkeypatch.setattr("trader_shawn.war_room.web.build_cli_runtime", _boom_runtime)
+    monkeypatch.setattr("trader_shawn.app.build_cli_runtime", _boom_runtime)
+
+    app = create_war_room_app()
+    client = TestClient(app, raise_server_exceptions=False)
+
+    arm = client.post("/api/war-room/arm", json={"phrase": "ARM"})
+    assert arm.status_code == 204
+
+    response = client.post("/api/war-room/commands/scan", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "error"
+    assert payload["reason"] == "config_load_failed"
+    assert payload["error_type"] == "RuntimeError"
+    assert payload["message"] == "broken config"
+
+
+def test_shared_default_runtime_initializes_once_under_concurrent_first_access(monkeypatch) -> None:
+    start = threading.Barrier(3)
+    release_runtime = threading.Event()
+    runtime_entered = threading.Event()
+    build_calls = {"count": 0}
+    provider_calls = {"count": 0}
+    shared_runtime = object()
+
+    def _blocking_runtime_builder():
+        build_calls["count"] += 1
+        runtime_entered.set()
+        assert release_runtime.wait(timeout=3.0)
+        return shared_runtime
+
+    def _provider_factory(*, runtime=None):
+        provider_calls["count"] += 1
+        assert runtime is shared_runtime
+        return lambda: {"status": "ok", "source": "snapshot"}
+
+    def _runtime_runner(command, payload=None, *, runtime=None):
+        _ = payload
+        assert command == "scan"
+        assert runtime is shared_runtime
+        return {"status": "ok", "source": "command"}
+
+    monkeypatch.setattr("trader_shawn.war_room.web.build_cli_runtime", _blocking_runtime_builder)
+    monkeypatch.setattr("trader_shawn.war_room.web.create_default_snapshot_provider", _provider_factory)
+    monkeypatch.setattr("trader_shawn.war_room.web.run_runtime_command", _runtime_runner)
+
+    provider, runner = web_module._lazy_shared_default_provider_and_runner()
+    outputs: list[dict[str, str]] = []
+    errors: list[Exception] = []
+
+    def _call_provider() -> None:
+        start.wait()
+        try:
+            outputs.append(provider())
+        except Exception as exc:  # pragma: no cover - diagnostic guard
+            errors.append(exc)
+
+    def _call_runner() -> None:
+        start.wait()
+        try:
+            outputs.append(runner("scan", {}))
+        except Exception as exc:  # pragma: no cover - diagnostic guard
+            errors.append(exc)
+
+    provider_thread = threading.Thread(target=_call_provider)
+    runner_thread = threading.Thread(target=_call_runner)
+    provider_thread.start()
+    runner_thread.start()
+    start.wait()
+    assert runtime_entered.wait(timeout=3.0)
+    release_runtime.set()
+    provider_thread.join(timeout=3.0)
+    runner_thread.join(timeout=3.0)
+
+    assert not errors
+    assert len(outputs) == 2
+    assert build_calls["count"] == 1
+    assert provider_calls["count"] == 1
+
+
+def test_shared_default_runtime_serializes_provider_and_runner_use(monkeypatch) -> None:
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+    provider_in_progress = threading.Event()
+    command_entered = threading.Event()
+    runner_started = threading.Event()
+    shared_runtime = object()
+
+    def _runtime_builder():
+        return shared_runtime
+
+    def _provider_factory(*, runtime=None):
+        assert runtime is shared_runtime
+
+        def _provider():
+            provider_in_progress.set()
+            provider_entered.set()
+            assert release_provider.wait(timeout=3.0)
+            provider_in_progress.clear()
+            return {"status": "ok", "source": "snapshot"}
+
+        return _provider
+
+    def _runtime_runner(command, payload=None, *, runtime=None):
+        _ = payload
+        assert command == "scan"
+        assert runtime is shared_runtime
+        command_entered.set()
+        assert not provider_in_progress.is_set()
+        return {"status": "ok", "source": "command"}
+
+    monkeypatch.setattr("trader_shawn.war_room.web.build_cli_runtime", _runtime_builder)
+    monkeypatch.setattr("trader_shawn.war_room.web.create_default_snapshot_provider", _provider_factory)
+    monkeypatch.setattr("trader_shawn.war_room.web.run_runtime_command", _runtime_runner)
+
+    provider, runner = web_module._lazy_shared_default_provider_and_runner()
+    assert runner("scan", {})["status"] == "ok"
+    command_entered.clear()
+
+    errors: list[Exception] = []
+    outputs: list[dict[str, str]] = []
+
+    def _call_provider() -> None:
+        try:
+            outputs.append(provider())
+        except Exception as exc:  # pragma: no cover - diagnostic guard
+            errors.append(exc)
+
+    def _call_runner() -> None:
+        runner_started.set()
+        try:
+            outputs.append(runner("scan", {}))
+        except Exception as exc:  # pragma: no cover - diagnostic guard
+            errors.append(exc)
+
+    provider_thread = threading.Thread(target=_call_provider)
+    provider_thread.start()
+    assert provider_entered.wait(timeout=3.0)
+
+    runner_thread = threading.Thread(target=_call_runner)
+    runner_thread.start()
+    assert runner_started.wait(timeout=3.0)
+    assert command_entered.wait(timeout=0.2) is False
+
+    release_provider.set()
+    provider_thread.join(timeout=3.0)
+    runner_thread.join(timeout=3.0)
+
+    assert not errors
+    assert len(outputs) == 2
+    assert command_entered.is_set()

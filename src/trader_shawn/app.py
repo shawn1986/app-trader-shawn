@@ -357,10 +357,26 @@ def _trade_cycle_command() -> dict[str, Any]:
     return _with_dashboard_error(result, _update_dashboard_snapshot(runtime, result))
 
 
+def run_cli_command_with_runtime(command: str, runtime: CliRuntime) -> dict[str, Any]:
+    if command == "scan":
+        return _scan_command_with_runtime(runtime)
+    if command == "decide":
+        return _decide_command_with_runtime(runtime)
+    if command == "trade":
+        return _trade_command_with_runtime(runtime)
+    if command == "manage":
+        return _manage_command_with_runtime(runtime)
+    raise ValueError(f"Unsupported command: {command}")
+
+
 def _scan_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
+    return _scan_command_with_runtime(runtime)
+
+
+def _scan_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
     candidates, candidate_error = _scan_candidates(runtime, command="scan")
     if candidate_error is not None:
         return candidate_error
@@ -376,7 +392,10 @@ def _decide_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
+    return _decide_command_with_runtime(runtime)
 
+
+def _decide_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
     candidates, candidate_error = _scan_candidates(runtime, command="decide")
     if candidate_error is not None:
         return candidate_error
@@ -404,6 +423,10 @@ def _trade_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
+    return _trade_command_with_runtime(runtime)
+
+
+def _trade_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
     result = _execute_entry_workflow("trade", runtime)
     return _with_dashboard_error(result, _update_dashboard_snapshot(runtime, result))
 
@@ -412,6 +435,10 @@ def _manage_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
+    return _manage_command_with_runtime(runtime)
+
+
+def _manage_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
 
     manager = getattr(runtime, "position_manager", None)
     manage_positions = _resolve_runtime_method(manager, "manage_positions")

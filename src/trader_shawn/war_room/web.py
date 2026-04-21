@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
+import inspect
 from pathlib import Path
+import threading
 import time
 from typing import Any, Callable
 
@@ -38,8 +40,11 @@ def create_war_room_app(
         name="static",
     )
     templates = Jinja2Templates(directory=str(war_room_dir / "templates"))
-    provider = snapshot_provider or _lazy_default_snapshot_provider()
-    runner = command_runner or run_runtime_command
+    if snapshot_provider is None and command_runner is None:
+        provider, runner = _lazy_shared_default_provider_and_runner()
+    else:
+        provider = snapshot_provider or _lazy_default_snapshot_provider()
+        runner = command_runner or run_runtime_command
     armed_sessions = ArmedSessionStore()
 
     @app.get("/war-room")
@@ -88,8 +93,9 @@ def create_war_room_app(
 def create_default_snapshot_provider(
     dashboard_state_path: Path | None = None,
     audit_db_path: Path | None = None,
+    runtime: Any | None = None,
 ) -> SnapshotProvider:
-    runtime = build_cli_runtime()
+    runtime = runtime or build_cli_runtime()
     resolved_dashboard_state_path = dashboard_state_path or runtime.dashboard_state_path
     resolved_audit_db_path = audit_db_path or runtime.settings.audit_db_path
     mode = str(getattr(runtime.settings, "mode", "paper"))
@@ -119,6 +125,61 @@ def create_default_snapshot_provider(
         )
 
     return provider
+
+
+def _lazy_shared_default_provider_and_runner() -> tuple[SnapshotProvider, CommandRunner]:
+    runtime: Any | None = None
+    provider: SnapshotProvider | None = None
+    init_lock = threading.RLock()
+    runtime_use_lock = threading.Lock()
+    provider_factory = create_default_snapshot_provider
+    provider_accepts_runtime = "runtime" in inspect.signature(provider_factory).parameters
+
+    def _ensure_runtime() -> Any:
+        nonlocal runtime
+        if runtime is not None:
+            return runtime
+        with init_lock:
+            if runtime is None:
+                runtime = build_cli_runtime()
+        return runtime
+
+    def _ensure_provider() -> SnapshotProvider:
+        nonlocal provider
+        if provider is not None:
+            return provider
+        with init_lock:
+            if provider is None:
+                if provider_accepts_runtime:
+                    provider = provider_factory(runtime=_ensure_runtime())
+                else:
+                    provider = provider_factory()
+        return provider
+
+    def lazy_provider() -> dict[str, Any]:
+        try:
+            resolved_provider = _ensure_provider()
+        except Exception as exc:
+            return _degraded_snapshot(
+                reason="snapshot_provider_unavailable",
+                exc=exc,
+            )
+
+        try:
+            with runtime_use_lock:
+                return resolved_provider()
+        except Exception as exc:
+            return _degraded_snapshot(reason="snapshot_provider_error", exc=exc)
+
+    def lazy_runner(command: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            resolved_runtime = _ensure_runtime()
+        except Exception:
+            return run_runtime_command(command, payload)
+        with runtime_use_lock:
+            return run_runtime_command(command, payload, runtime=resolved_runtime)
+
+    return lazy_provider, lazy_runner
 
 
 def _lazy_default_snapshot_provider() -> SnapshotProvider:
