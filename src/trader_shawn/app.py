@@ -1009,6 +1009,9 @@ def _detect_active_position_event(
                 continue
             if events and events[-1].get("event_type") == event_type:
                 fingerprints.append(str(position["broker_fingerprint"]))
+                continue
+            if _has_uncertain_submit_marker(position, event_type=event_type):
+                fingerprints.append(str(position["broker_fingerprint"]))
     except Exception as exc:
         return {
             "status": "anomaly",
@@ -1029,6 +1032,16 @@ def _detect_active_position_event(
         "fingerprints": sorted(set(fingerprints)),
         "manual_intervention_required": True,
     }
+
+
+def _has_uncertain_submit_marker(
+    position: dict[str, Any],
+    *,
+    event_type: str,
+) -> bool:
+    if "uncertain" not in event_type:
+        return False
+    return str(position.get("risk_note") or "").strip() == "manual intervention required"
 
 
 def _fingerprint_matches_ticker(fingerprint: str, ticker: str) -> bool:

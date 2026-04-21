@@ -10,6 +10,7 @@ from trader_shawn.execution.ibkr_executor import OrderNotSubmittedError
 from trader_shawn.events.earnings_calendar import EarningsCalendar
 
 _OPENING_STALE_AFTER = timedelta(minutes=15)
+_UNCERTAIN_SUBMIT_RISK_NOTE = "manual intervention required"
 
 
 class PositionManager:
@@ -188,16 +189,12 @@ class PositionManager:
                 )
                 raise
             except Exception as exc:
-                self._audit_logger.record_position_event(
-                    managed_position["position_id"],
-                    "close_submit_uncertain",
-                    {
-                        "exit_reason": submission_target["exit_reason"],
-                        "limit_price": float(snapshot.current_debit),
-                        "broker_fingerprint": managed_position["broker_fingerprint"],
-                        "error": str(exc),
-                    },
-                    created_at=recorded_at,
+                self._persist_uncertain_close_submission(
+                    managed_position=managed_position,
+                    snapshot=snapshot,
+                    exit_reason=str(submission_target["exit_reason"]),
+                    recorded_at=recorded_at,
+                    exc=exc,
                 )
                 raise
 
@@ -228,6 +225,42 @@ class PositionManager:
             "status": "ok",
             "managed_count": len(managed_positions),
         }
+
+    def _persist_uncertain_close_submission(
+        self,
+        *,
+        managed_position: dict[str, Any],
+        snapshot: PositionSnapshot,
+        exit_reason: str,
+        recorded_at: datetime,
+        exc: Exception,
+    ) -> None:
+        update_managed_position = getattr(self._audit_logger, "update_managed_position", None)
+        if update_managed_position is not None:
+            try:
+                update_managed_position(
+                    managed_position["position_id"],
+                    last_known_debit=float(snapshot.current_debit),
+                    last_evaluated_at=recorded_at.isoformat(),
+                    risk_note=_UNCERTAIN_SUBMIT_RISK_NOTE,
+                )
+            except Exception:
+                pass
+
+        try:
+            self._audit_logger.record_position_event(
+                managed_position["position_id"],
+                "close_submit_uncertain",
+                {
+                    "exit_reason": exit_reason,
+                    "limit_price": float(snapshot.current_debit),
+                    "broker_fingerprint": managed_position["broker_fingerprint"],
+                    "error": str(exc),
+                },
+                created_at=recorded_at,
+            )
+        except Exception:
+            pass
 
     def _finalize_missing_closing_positions(
         self,
@@ -261,6 +294,9 @@ class PositionManager:
         fingerprints: set[str] = set()
         for managed_position in managed_positions:
             if managed_position["status"] != "closing":
+                continue
+            if _has_uncertain_submit_marker(managed_position):
+                fingerprints.add(str(managed_position["broker_fingerprint"]))
                 continue
             events = self._audit_logger.fetch_position_events(
                 managed_position["position_id"]
@@ -474,6 +510,10 @@ def _stale_opening_positions(
         if now - opened_at >= _OPENING_STALE_AFTER:
             stale.append(managed_position)
     return stale
+
+
+def _has_uncertain_submit_marker(managed_position: dict[str, Any]) -> bool:
+    return str(managed_position.get("risk_note") or "").strip() == _UNCERTAIN_SUBMIT_RISK_NOTE
 
 
 def _parse_managed_datetime(value: Any) -> datetime | None:

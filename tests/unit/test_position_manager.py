@@ -2629,6 +2629,103 @@ def test_manage_positions_treats_place_order_failure_as_ambiguous_submit(
     }
 
 
+def test_manage_positions_keeps_uncertain_close_guard_when_event_write_fails(
+    tmp_path: Path,
+) -> None:
+    base_logger = AuditLogger(tmp_path / "audit.db")
+    base_logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "open",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by system",
+            "risk_note": "",
+        }
+    )
+    market_data = FakeManageMarketData(
+        option_positions=[
+            BrokerOptionPosition(
+                ticker="AMD",
+                expiry="2026-04-30",
+                right="P",
+                quantity=-1,
+                short_strike=160.0,
+                broker_position_id="80160",
+            ),
+            BrokerOptionPosition(
+                ticker="AMD",
+                expiry="2026-04-30",
+                right="P",
+                quantity=1,
+                short_strike=155.0,
+                broker_position_id="80155",
+            ),
+        ],
+        spread_debit=0.42,
+        spot_price=171.0,
+    )
+    failing_logger = FailingCloseSubmitUncertainEventAuditLogger(base_logger)
+    manager = PositionManager(
+        audit_logger=failing_logger,
+        market_data=market_data,
+        executor=FailingSubmitManageExecutor(),
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    with pytest.raises(RuntimeError, match="submit temporarily unavailable"):
+        manager.manage_positions()
+
+    persisted = base_logger.fetch_active_managed_positions(mode="paper")[0]
+    assert persisted["status"] == "closing"
+    assert persisted["risk_note"] == "manual intervention required"
+    assert base_logger.fetch_position_events("pos-1") == []
+
+    retry_executor = FakeManageExecutor()
+    retry_manager = PositionManager(
+        audit_logger=base_logger,
+        market_data=market_data,
+        executor=retry_executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = retry_manager.manage_positions()
+
+    assert result == {
+        "status": "anomaly",
+        "reason": "uncertain_submit_state",
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "manual_intervention_required": True,
+    }
+    assert retry_executor.calls == []
+
+
 def test_manage_positions_finalizes_missing_closing_positions_before_returning_uncertain_submit_anomaly(
     tmp_path: Path,
 ) -> None:
@@ -3120,6 +3217,47 @@ class FailingClosingUpdateAuditLogger:
         *,
         created_at: datetime | None = None,
     ) -> None:
+        self._base_logger.record_position_event(
+            position_id,
+            event_type,
+            payload,
+            created_at=created_at,
+        )
+
+
+class FailingCloseSubmitUncertainEventAuditLogger:
+    def __init__(self, base_logger: AuditLogger) -> None:
+        self._base_logger = base_logger
+
+    def fetch_active_managed_positions(self, *, mode: str) -> list[dict[str, object]]:
+        return self._base_logger.fetch_active_managed_positions(mode=mode)
+
+    def update_managed_position_if_status(
+        self,
+        position_id: str,
+        *,
+        expected_status: str,
+        **updates: object,
+    ) -> bool:
+        return self._base_logger.update_managed_position_if_status(
+            position_id,
+            expected_status=expected_status,
+            **updates,
+        )
+
+    def update_managed_position(self, position_id: str, **updates: object) -> None:
+        self._base_logger.update_managed_position(position_id, **updates)
+
+    def record_position_event(
+        self,
+        position_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        *,
+        created_at: datetime | None = None,
+    ) -> None:
+        if event_type == "close_submit_uncertain":
+            raise RuntimeError("audit temporarily unavailable")
         self._base_logger.record_position_event(
             position_id,
             event_type,
