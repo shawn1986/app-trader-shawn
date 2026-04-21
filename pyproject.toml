@@ -23,6 +23,7 @@ trader-shawn = "trader_shawn.app:main"
 
 [project.optional-dependencies]
 dev = [
+    "httpx>=0.27,<1",
     "pytest>=8.2,<9",
 ]
 
