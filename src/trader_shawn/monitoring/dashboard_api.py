@@ -37,7 +37,7 @@ def read_dashboard_snapshot(path: str | Path) -> dict[str, Any]:
             status="error",
             error={
                 "type": "OSError",
-                "message": str(snapshot_path),
+                "message": str(exc),
             },
         )
 

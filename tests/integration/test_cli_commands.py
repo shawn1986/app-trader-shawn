@@ -315,14 +315,13 @@ def test_dashboard_command_returns_structured_error_for_directory_path(tmp_path:
     result = runner.invoke(cli, ["dashboard", str(tmp_path)])
 
     assert result.exit_code == 0
-    assert json.loads(result.output) == {
-        "status": "error",
-        "last_cycle": {},
-        "error": {
-            "type": "OSError",
-            "message": str(tmp_path),
-        },
-    }
+    payload = json.loads(result.output)
+    assert payload["status"] == "error"
+    assert payload["last_cycle"] == {}
+    assert payload["error"]["type"] == "OSError"
+    assert isinstance(payload["error"]["message"], str)
+    assert payload["error"]["message"]
+    assert payload["error"]["message"] != str(tmp_path)
 
 
 def test_scan_command_executes_runtime_scan_and_returns_candidates(monkeypatch) -> None:

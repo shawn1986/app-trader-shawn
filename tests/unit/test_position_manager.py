@@ -1664,6 +1664,48 @@ def test_manage_positions_fails_closed_when_saved_fields_do_not_match_full_ident
     assert position["last_evaluated_at"] is None
 
 
+def test_manage_positions_reports_broker_leg_identifier_when_leftover_pairing_fails(
+    tmp_path: Path,
+) -> None:
+    logger = AuditLogger(tmp_path / "audit.db")
+    executor = FakeManageExecutor()
+    manager = PositionManager(
+        audit_logger=logger,
+        market_data=FakeManageMarketData(
+            option_positions=[
+                BrokerOptionPosition(
+                    ticker="AMD",
+                    expiry="2026-04-30",
+                    right="P",
+                    quantity=-1,
+                    short_strike=160.0,
+                    broker_position_id="80160",
+                ),
+            ],
+            spread_debit=0.42,
+            spot_price=171.0,
+        ),
+        executor=executor,
+        earnings_calendar=EarningsCalendar([]),
+        risk_settings=SimpleNamespace(
+            profit_take_pct=0.5,
+            stop_loss_multiple=2.0,
+            exit_dte_threshold=5,
+        ),
+        mode="paper",
+        as_of=date(2026, 4, 20),
+    )
+
+    result = manager.manage_positions()
+
+    assert result == {
+        "status": "anomaly",
+        "reason": "unknown_broker_position",
+        "fingerprints": ["AMD|2026-04-30|P|160.0|-"],
+    }
+    assert executor.calls == []
+
+
 def test_manage_positions_fails_closed_when_saved_strategy_does_not_match_broker_identity(
     tmp_path: Path,
 ) -> None:

@@ -427,7 +427,7 @@ def _reconcile_positions(
     if leftover_fingerprints is None:
         return _anomaly_result(
             reason="unknown_broker_position",
-            fingerprints=sorted(unknown_fingerprints),
+            fingerprints=_malformed_broker_leg_identifiers(available_legs),
         )
     unknown_fingerprints.update(leftover_fingerprints)
 
@@ -746,6 +746,20 @@ def _leftover_broker_fingerprints(
                 )
             )
     return fingerprints
+
+
+def _malformed_broker_leg_identifiers(
+    available_legs: list[tuple[str, str, str, int, float]],
+) -> list[str]:
+    identifiers = {
+        (
+            f"{ticker}|{expiry}|{right}|{float(strike)}|-"
+            if quantity < 0
+            else f"{ticker}|{expiry}|{right}|-|{float(strike)}"
+        )
+        for ticker, expiry, right, quantity, strike in available_legs
+    }
+    return sorted(identifiers)
 
 
 def _pair_leftover_strikes(
