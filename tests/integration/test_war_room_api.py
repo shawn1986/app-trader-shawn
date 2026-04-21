@@ -22,3 +22,32 @@ def test_snapshot_endpoint_returns_war_room_payload() -> None:
     assert response.status_code == 200
     assert response.json()["threat_level"] == "warning"
     assert response.json()["risk_deck"]["open_risk"] == 1200.0
+
+
+def test_command_endpoint_requires_armed_session() -> None:
+    app = create_war_room_app(
+        snapshot_provider=lambda: {},
+        command_runner=lambda command, payload=None: {"status": "ok", "command": command},
+    )
+    client = TestClient(app)
+
+    response = client.post("/api/war-room/commands/manage", json={})
+
+    assert response.status_code == 403
+    assert response.json()["reason"] == "armed_mode_required"
+
+
+def test_trade_endpoint_requires_explicit_confirmation() -> None:
+    app = create_war_room_app(
+        snapshot_provider=lambda: {},
+        command_runner=lambda command, payload=None: {"status": "submitted", "command": command},
+    )
+    client = TestClient(app)
+
+    arm = client.post("/api/war-room/arm", json={"phrase": "ARM"})
+    assert arm.status_code == 204
+
+    response = client.post("/api/war-room/commands/trade", json={"confirmed": False})
+
+    assert response.status_code == 409
+    assert response.json()["reason"] == "trade_confirmation_required"
