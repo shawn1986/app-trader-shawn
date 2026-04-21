@@ -529,6 +529,35 @@ def test_ibkr_market_data_client_materializes_rights_iterators_once() -> None:
     assert len(ib_client.ticker_requests[-1]) == 8
 
 
+def test_ibkr_market_data_client_drops_quotes_with_missing_bid_or_ask() -> None:
+    ib_client = FakeMarketDataClient(
+        quote_overrides={
+            ("P", 95.0): {
+                "bid": None,
+                "ask": math.nan,
+            }
+        }
+    )
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+    )
+
+    quotes = client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P",),
+        as_of=date(2026, 4, 20),
+    )
+
+    assert len(quotes) == 2
+    assert {(quote.expiry, quote.strike) for quote in quotes} == {
+        ("2026-04-30", 100.0),
+        ("2026-05-08", 100.0),
+    }
+
+
 def test_ibkr_market_data_client_maps_account_summary_and_counts_open_option_positions() -> None:
     ib_client = FakeMarketDataClient()
     client = IbkrMarketDataClient(

@@ -264,14 +264,18 @@ class IbkrMarketDataClient:
     ) -> list[OptionQuote]:
         quotes: list[OptionQuote] = []
         for row in raw_quotes:
+            bid = _optional_float(row["bid"])
+            ask = _optional_float(row["ask"])
+            if bid is None or ask is None:
+                continue
             quotes.append(
                 OptionQuote(
                     symbol=ticker,
                     expiry=str(row["expiry"]),
                     strike=float(row["strike"]),
                     right=str(row["right"]),
-                    bid=_finite_or_zero(row["bid"]),
-                    ask=_finite_or_zero(row["ask"]),
+                    bid=bid,
+                    ask=ask,
                     delta=_optional_float(row.get("delta")),
                     last=_optional_float(row.get("last")),
                     mark=_optional_float(row.get("mark")),

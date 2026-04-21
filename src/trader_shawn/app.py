@@ -414,6 +414,19 @@ def _manage_command() -> dict[str, Any]:
     try:
         result = manage_positions()
     except Exception as exc:
+        uncertain_state = _detect_unresolved_uncertain_submission(
+            runtime,
+            event_type="close_submit_uncertain",
+        )
+        if uncertain_state is not None:
+            response = {
+                **_command_envelope("manage", runtime=runtime),
+                **uncertain_state,
+            }
+            return _with_dashboard_error(
+                response,
+                _update_dashboard_snapshot(runtime, response),
+            )
         response = _command_exception(
             "manage",
             runtime=runtime,
@@ -866,8 +879,23 @@ def _detect_unresolved_uncertain_open_submission(
     *,
     ticker: str,
 ) -> dict[str, Any] | None:
-    if not ticker:
+    return _detect_unresolved_uncertain_submission(
+        runtime,
+        event_type="open_submit_uncertain",
+        ticker=ticker,
+    )
+
+
+def _detect_unresolved_uncertain_submission(
+    runtime: CliRuntime,
+    *,
+    event_type: str,
+    ticker: str | None = None,
+) -> dict[str, Any] | None:
+    if ticker == "":
         return None
+    if ticker is None:
+        ticker = None
 
     audit_logger = getattr(runtime, "audit_logger", None)
     fetch_active_positions = _resolve_runtime_method(
@@ -885,10 +913,10 @@ def _detect_unresolved_uncertain_open_submission(
     try:
         active_positions = fetch_active_positions(mode=runtime.settings.mode)
         for position in active_positions:
-            if str(position.get("ticker", "")) != ticker:
+            if ticker is not None and str(position.get("ticker", "")) != ticker:
                 continue
             events = fetch_position_events(str(position["position_id"]))
-            if events and events[-1].get("event_type") == "open_submit_uncertain":
+            if events and events[-1].get("event_type") == event_type:
                 fingerprints.append(str(position["broker_fingerprint"]))
     except Exception as exc:
         return {

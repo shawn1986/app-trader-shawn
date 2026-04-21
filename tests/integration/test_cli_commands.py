@@ -960,6 +960,70 @@ def test_manage_command_executes_real_runtime_manager(tmp_path: Path, monkeypatc
     assert payload["config_dir"] == str(builder["config_dir"])
 
 
+def test_manage_command_surfaces_uncertain_submit_state(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    audit_logger = AuditLogger(tmp_path / "audit.db")
+    audit_logger.upsert_managed_position(
+        {
+            "position_id": "pos-1",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.05,
+            "entry_order_id": 321,
+            "mode": "paper",
+            "status": "closing",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": 0.42,
+            "last_evaluated_at": "2026-04-20T10:00:00+00:00",
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "close in progress",
+            "risk_note": "",
+        }
+    )
+    audit_logger.record_position_event(
+        "pos-1",
+        "close_submit_uncertain",
+        {
+            "exit_reason": "take_profit",
+            "limit_price": 0.42,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "error": "submit temporarily unavailable",
+        },
+    )
+
+    def raise_uncertain() -> dict[str, object]:
+        raise RuntimeError("submit temporarily unavailable")
+
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            position_manager=SimpleNamespace(manage_positions=raise_uncertain),
+            audit_logger=audit_logger,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["manage"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "command": "manage",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "live_enabled": False,
+        "manual_intervention_required": True,
+        "mode": "paper",
+        "reason": "uncertain_submit_state",
+        "status": "anomaly",
+    }
+
+
 def test_manage_command_updates_dashboard_snapshot_via_real_builder(
     tmp_path: Path,
     monkeypatch,
