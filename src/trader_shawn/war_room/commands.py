@@ -11,6 +11,12 @@ from trader_shawn.app import _decide_command, _manage_command, _scan_command, _t
 RuntimeCommand = Callable[[], dict[str, Any]]
 
 
+class UnsupportedWarRoomCommand(ValueError):
+    def __init__(self, command: str) -> None:
+        self.command = command
+        super().__init__(f"Unsupported command: {command}")
+
+
 class ArmedSessionStore:
     def __init__(self, ttl_seconds: int = 900) -> None:
         self._ttl_seconds = ttl_seconds
@@ -51,5 +57,5 @@ def run_runtime_command(command: str, payload: dict[str, Any] | None = None) -> 
     }
     handler = command_map.get(command)
     if handler is None:
-        raise ValueError(f"Unsupported command: {command}")
+        raise UnsupportedWarRoomCommand(command)
     return handler()

@@ -14,7 +14,11 @@ from fastapi.templating import Jinja2Templates
 from trader_shawn.app import build_cli_runtime
 from trader_shawn.monitoring.audit_logger import AuditLogger
 from trader_shawn.monitoring.dashboard_api import read_dashboard_snapshot
-from trader_shawn.war_room.commands import ArmedSessionStore, run_runtime_command
+from trader_shawn.war_room.commands import (
+    ArmedSessionStore,
+    UnsupportedWarRoomCommand,
+    run_runtime_command,
+)
 from trader_shawn.war_room.service import build_war_room_snapshot
 
 
@@ -70,8 +74,11 @@ def create_war_room_app(
 
         try:
             result = runner(command_name, payload)
-        except ValueError:
-            return JSONResponse({"reason": "unsupported_command"}, status_code=404)
+        except UnsupportedWarRoomCommand as exc:
+            return JSONResponse(
+                {"reason": "unsupported_command", "command": exc.command},
+                status_code=404,
+            )
 
         return JSONResponse(result)
 
@@ -116,21 +123,17 @@ def create_default_snapshot_provider(
 
 def _lazy_default_snapshot_provider() -> SnapshotProvider:
     provider: SnapshotProvider | None = None
-    provider_error: Exception | None = None
 
     def lazy_provider() -> dict[str, Any]:
-        nonlocal provider, provider_error
-        if provider is None and provider_error is None:
+        nonlocal provider
+        if provider is None:
             try:
                 provider = create_default_snapshot_provider()
             except Exception as exc:
-                provider_error = exc
-
-        if provider is None:
-            return _degraded_snapshot(
-                reason="snapshot_provider_unavailable",
-                exc=provider_error,
-            )
+                return _degraded_snapshot(
+                    reason="snapshot_provider_unavailable",
+                    exc=exc,
+                )
 
         try:
             return provider()

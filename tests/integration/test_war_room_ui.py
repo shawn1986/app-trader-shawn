@@ -136,3 +136,32 @@ def test_war_room_unlocks_controls_and_refreshes_threat_level(live_server) -> No
         )
 
         browser.close()
+
+
+def test_war_room_relocks_after_armed_session_expires(live_server) -> None:
+    with sync_playwright() as p:
+        browser = _launch_chromium_or_skip(p)
+        page = browser.new_page()
+        page.goto(f"{live_server}/war-room")
+        page.wait_for_function(
+            "() => document.querySelector('[data-threat-level]')?.textContent.trim() === 'Warning'"
+        )
+
+        page.fill("[data-arm-input]", "ARM")
+        page.click("[data-arm-submit]")
+        page.wait_for_selector('[data-command="trade"]:not([disabled])')
+
+        page.context.clear_cookies()
+
+        page.click('[data-command="trade"]')
+        page.wait_for_selector("[data-trade-confirm]:not([hidden])")
+        page.click("[data-trade-confirm-submit]")
+
+        page.wait_for_function("() => document.body.dataset.mode === 'monitoring'")
+        page.wait_for_selector('[data-command="manage"][disabled]')
+        page.wait_for_selector("[data-trade-confirm][hidden]")
+        page.wait_for_function(
+            "() => document.querySelector('[data-mission-log] li')?.textContent.includes('armed_mode_required')"
+        )
+
+        browser.close()

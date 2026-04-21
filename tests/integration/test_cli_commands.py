@@ -297,6 +297,20 @@ def test_cli_has_expected_subcommands() -> None:
     assert "war-room" in result.output
 
 
+def test_war_room_command_rejects_non_loopback_host(monkeypatch) -> None:
+    runner = CliRunner()
+
+    def _unexpected_run(*args, **kwargs) -> None:
+        raise AssertionError("uvicorn.run should not be called for non-loopback host")
+
+    monkeypatch.setattr(app_module.uvicorn, "run", _unexpected_run)
+
+    result = runner.invoke(cli, ["war-room", "--host", "0.0.0.0"])
+
+    assert result.exit_code == 1
+    assert "Error: war-room only supports loopback host binding" in result.output
+
+
 def test_dashboard_command_returns_default_snapshot_for_missing_file(tmp_path: Path) -> None:
     runner = CliRunner()
 

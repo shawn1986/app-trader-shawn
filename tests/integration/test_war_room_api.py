@@ -68,6 +68,41 @@ def test_trade_endpoint_requires_explicit_confirmation() -> None:
     assert response.json()["reason"] == "trade_confirmation_required"
 
 
+def test_command_endpoint_maps_unsupported_command_exception_to_404() -> None:
+    app = create_war_room_app(snapshot_provider=lambda: {})
+    client = TestClient(app)
+
+    arm = client.post("/api/war-room/arm", json={"phrase": "ARM"})
+    assert arm.status_code == 204
+
+    response = client.post("/api/war-room/commands/liquidate", json={})
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "reason": "unsupported_command",
+        "command": "liquidate",
+    }
+
+
+def test_command_endpoint_does_not_map_runtime_value_error_to_404() -> None:
+    def command_runner(command: str, payload=None) -> dict[str, str]:
+        _ = payload
+        if command == "manage":
+            raise ValueError("transient manage failure")
+        return {"status": "ok", "command": command}
+
+    app = create_war_room_app(snapshot_provider=lambda: {}, command_runner=command_runner)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    arm = client.post("/api/war-room/arm", json={"phrase": "ARM"})
+    assert arm.status_code == 204
+
+    response = client.post("/api/war-room/commands/manage", json={})
+
+    assert response.status_code == 500
+    assert "Internal Server Error" in response.text
+
+
 def test_snapshot_endpoint_uses_default_provider_with_runtime_sources(
     tmp_path: Path,
     monkeypatch,
@@ -241,3 +276,38 @@ def test_create_war_room_app_starts_when_default_provider_creation_fails(monkeyp
     assert payload["threat_level"] == "warning"
     assert payload["command_status"]["broker"]["state"] == "degraded"
     assert payload["command_status"]["broker"]["message"] == "snapshot_provider_unavailable"
+
+
+def test_create_war_room_app_retries_lazy_default_provider_creation_after_failure(monkeypatch) -> None:
+    attempts = {"count": 0}
+
+    def _flaky_default_provider():
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("startup race")
+        return lambda: {
+            "generated_at": "2026-04-21T01:02:00+00:00",
+            "threat_level": "nominal",
+            "command_status": {"broker": {"state": "ok"}},
+            "risk_deck": {"open_risk": 100.0},
+            "hot_positions": [],
+            "mission_log": [],
+            "threat_rail": {"level": "nominal"},
+        }
+
+    monkeypatch.setattr(
+        "trader_shawn.war_room.web.create_default_snapshot_provider",
+        _flaky_default_provider,
+    )
+
+    app = create_war_room_app()
+    client = TestClient(app)
+
+    first = client.get("/api/war-room/snapshot")
+    assert first.status_code == 200
+    assert first.json()["command_status"]["broker"]["message"] == "snapshot_provider_unavailable"
+
+    second = client.get("/api/war-room/snapshot")
+    assert second.status_code == 200
+    assert second.json()["threat_level"] == "nominal"
+    assert attempts["count"] == 2

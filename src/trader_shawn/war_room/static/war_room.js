@@ -46,6 +46,34 @@ function hideTradeConfirm() {
     tray.hidden = true;
 }
 
+function relockWarRoom() {
+    setArmedMode(false);
+    pendingTrade = null;
+    hideTradeConfirm();
+}
+
+async function commandResultFromResponse(response, commandName) {
+    if (response.ok) {
+        return await response.json();
+    }
+
+    let reason = "failed";
+    try {
+        const payload = await response.json();
+        if (payload && typeof payload.reason === "string") {
+            reason = payload.reason;
+        }
+    } catch {
+        reason = "failed";
+    }
+
+    if (reason === "armed_mode_required") {
+        relockWarRoom();
+    }
+
+    return {command: commandName, status: reason};
+}
+
 async function fetchSnapshot() {
     const response = await fetch("/api/war-room/snapshot");
     if (!response.ok) {
@@ -96,9 +124,7 @@ async function runCommand(commandName) {
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({confirmed: true}),
     });
-    const result = response.ok
-        ? await response.json()
-        : {command: commandName, status: "failed"};
+    const result = await commandResultFromResponse(response, commandName);
     prependMissionResult(result);
     await fetchSnapshot();
 }
@@ -113,9 +139,7 @@ async function confirmTrade() {
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({confirmed: true}),
     });
-    const result = response.ok
-        ? await response.json()
-        : {command: "trade", status: "failed"};
+    const result = await commandResultFromResponse(response, "trade");
 
     prependMissionResult(result);
     pendingTrade = null;

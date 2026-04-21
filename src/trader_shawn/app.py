@@ -239,6 +239,11 @@ def dashboard_command(state_path: Path) -> None:
 @click.option("--host", default="127.0.0.1", show_default=True)
 @click.option("--port", default=8787, show_default=True, type=int)
 def war_room_command(host: str, port: int) -> None:
+    if host.strip().lower() not in {"127.0.0.1", "localhost"}:
+        raise click.ClickException(
+            "war-room only supports loopback host binding (127.0.0.1 or localhost)"
+        )
+
     from trader_shawn.war_room.web import create_war_room_app
 
     uvicorn.run(create_war_room_app(), host=host, port=port)
