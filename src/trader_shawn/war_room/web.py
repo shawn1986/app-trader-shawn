@@ -34,7 +34,7 @@ def create_war_room_app(
         name="static",
     )
     templates = Jinja2Templates(directory=str(war_room_dir / "templates"))
-    provider = snapshot_provider or create_default_snapshot_provider()
+    provider = snapshot_provider or _lazy_default_snapshot_provider()
     runner = command_runner or run_runtime_command
     armed_sessions = ArmedSessionStore()
 
@@ -95,18 +95,119 @@ def create_default_snapshot_provider(
             else {}
         )
         managed_positions = audit_logger.fetch_active_managed_positions(mode=mode)
-        position_events = audit_logger.fetch_recent_position_events()
+        position_events = _fetch_latest_events_for_active_positions(
+            audit_logger,
+            managed_positions=managed_positions,
+        )
+        mission_log_events = audit_logger.fetch_recent_position_events()
         account_snapshot, broker_health = _probe_broker_health(runtime)
         return build_war_room_snapshot(
             dashboard_state=dashboard_state,
             account_snapshot=account_snapshot,
             managed_positions=managed_positions,
             position_events=position_events,
+            mission_log_events=mission_log_events,
             broker_health=broker_health,
             now=datetime.now(UTC),
         )
 
     return provider
+
+
+def _lazy_default_snapshot_provider() -> SnapshotProvider:
+    provider: SnapshotProvider | None = None
+    provider_error: Exception | None = None
+
+    def lazy_provider() -> dict[str, Any]:
+        nonlocal provider, provider_error
+        if provider is None and provider_error is None:
+            try:
+                provider = create_default_snapshot_provider()
+            except Exception as exc:
+                provider_error = exc
+
+        if provider is None:
+            return _degraded_snapshot(
+                reason="snapshot_provider_unavailable",
+                exc=provider_error,
+            )
+
+        try:
+            return provider()
+        except Exception as exc:
+            return _degraded_snapshot(reason="snapshot_provider_error", exc=exc)
+
+    return lazy_provider
+
+
+def _degraded_snapshot(*, reason: str, exc: Exception | None) -> dict[str, Any]:
+    detail = (
+        {"type": type(exc).__name__, "message": str(exc)}
+        if exc is not None
+        else None
+    )
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "threat_level": "warning",
+        "command_status": {
+            "broker": {
+                "state": "degraded",
+                "freshness": "unknown",
+                "checked_at": None,
+                "latency_ms": None,
+                "message": reason,
+            },
+            "dashboard_status": "error",
+            "last_cycle": {},
+            "provider_error": detail,
+        },
+        "risk_deck": {
+            "net_liquidation": 0.0,
+            "unrealized_pnl": 0.0,
+            "open_risk": 0.0,
+            "new_positions_today": 0,
+            "active_managed_positions": 0,
+        },
+        "hot_positions": [],
+        "mission_log": [],
+        "threat_rail": {
+            "cycle_status": "error",
+            "reason": reason,
+            "manual_intervention_required": False,
+            "fingerprints": [],
+        },
+        "account_rail": {
+            "net_liquidation": 0.0,
+            "unrealized_pnl": 0.0,
+            "open_risk": 0.0,
+            "new_positions_today": 0,
+        },
+    }
+
+
+def _fetch_latest_events_for_active_positions(
+    audit_logger: AuditLogger,
+    *,
+    managed_positions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    latest_events: list[dict[str, Any]] = []
+    for position in managed_positions:
+        position_id = str(position.get("position_id", "")).strip()
+        if not position_id:
+            continue
+        position_events = audit_logger.fetch_position_events(position_id)
+        if not position_events:
+            continue
+        latest = position_events[-1]
+        latest_events.append(
+            {
+                "position_id": str(latest.get("position_id", position_id)),
+                "event_type": str(latest.get("event_type", "")),
+                "payload_json": latest.get("payload", {}),
+                "created_at": latest.get("created_at"),
+            }
+        )
+    return latest_events
 
 
 def _probe_broker_health(runtime: Any) -> tuple[dict[str, Any], dict[str, Any]]:

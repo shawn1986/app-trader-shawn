@@ -22,6 +22,7 @@ def build_war_room_snapshot(
     managed_positions: list[dict[str, Any]] | None,
     position_events: list[dict[str, Any]] | None,
     broker_health: dict[str, Any] | None,
+    mission_log_events: list[dict[str, Any]] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     current_time = _normalize_datetime(now or datetime.now(UTC))
@@ -29,6 +30,11 @@ def build_war_room_snapshot(
     last_cycle = _as_dict(normalized_dashboard_state.get("last_cycle"))
     normalized_positions = _as_dict_list(managed_positions)
     normalized_events = _as_dict_list(position_events)
+    normalized_mission_log_events = (
+        _as_dict_list(mission_log_events)
+        if mission_log_events is not None
+        else normalized_events
+    )
 
     threat_rail = ThreatRail(
         cycle_status=_as_non_empty_str(last_cycle.get("status")),
@@ -60,7 +66,7 @@ def build_war_room_snapshot(
             active_managed_positions=len(normalized_positions),
         ),
         "hot_positions": [position.to_dict() for position in hot_positions],
-        "mission_log": _build_mission_log(normalized_events),
+        "mission_log": _build_mission_log(normalized_mission_log_events),
         "threat_rail": threat_rail.to_dict(),
         "account_rail": account_rail.to_dict(),
     }
