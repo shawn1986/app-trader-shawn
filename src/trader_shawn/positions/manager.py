@@ -505,7 +505,7 @@ def _stored_identity(
     managed_position: dict[str, Any],
 ) -> tuple[str, str]:
     return (
-        str(managed_position["broker_fingerprint"]),
+        _normalize_broker_fingerprint(managed_position["broker_fingerprint"]),
         str(managed_position["strategy"]),
     )
 
@@ -517,7 +517,7 @@ def _identity_fingerprints(identities: set[tuple[str, str]]) -> list[str]:
 def _managed_fingerprint(managed_position: dict[str, Any]) -> str:
     strategy = str(managed_position["strategy"])
     return (
-        f"{managed_position['ticker']}|{managed_position['expiry']}|"
+        f"{_normalize_ticker(managed_position['ticker'])}|{managed_position['expiry']}|"
         f"{_option_right_for_strategy(strategy)}|"
         f"{float(managed_position['short_strike'])}|"
         f"{float(managed_position['long_strike'])}|"
@@ -531,7 +531,7 @@ def _broker_leg_key(
     if broker_position.short_strike is None:
         raise ValueError("broker option position is missing strike")
     return (
-        broker_position.ticker,
+        _normalize_ticker(broker_position.ticker),
         broker_position.expiry,
         broker_position.right,
         int(broker_position.quantity),
@@ -588,7 +588,7 @@ def _expected_broker_leg_keys(
 ]:
     right = _option_right_for_strategy(str(managed_position["strategy"]))
     quantity = int(managed_position["quantity"])
-    ticker = str(managed_position["ticker"])
+    ticker = _normalize_ticker(managed_position["ticker"])
     expiry = str(managed_position["expiry"])
     return (
         (
@@ -626,14 +626,14 @@ def _stored_broker_leg_keys(
         return None
     return (
         (
-            ticker,
+            _normalize_ticker(ticker),
             expiry,
             right,
             -parsed_quantity,
             parsed_short_strike,
         ),
         (
-            ticker,
+            _normalize_ticker(ticker),
             expiry,
             right,
             parsed_quantity,
@@ -741,7 +741,7 @@ def _leftover_broker_fingerprints(
         for short_strike, long_strike in ordered_pairs:
             fingerprints.add(
                 (
-                    f"{ticker}|{expiry}|{right}|{float(short_strike)}|"
+                    f"{_normalize_ticker(ticker)}|{expiry}|{right}|{float(short_strike)}|"
                     f"{float(long_strike)}|{quantity}"
                 )
             )
@@ -776,6 +776,18 @@ def _option_right_for_strategy(strategy: str) -> str:
     if normalized_strategy == "bear_call_credit_spread":
         return "C"
     raise ValueError(f"unsupported credit spread strategy: {strategy}")
+
+
+def _normalize_ticker(value: Any) -> str:
+    return str(value).strip().upper()
+
+
+def _normalize_broker_fingerprint(value: Any) -> str:
+    parts = str(value).split("|")
+    if len(parts) != 6:
+        return str(value)
+    parts[0] = _normalize_ticker(parts[0])
+    return "|".join(parts)
 
 
 def _infer_credit_spread_strategy(
