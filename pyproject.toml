@@ -9,14 +9,25 @@ description = "Bootstrap for Trader Shawn settings and configuration."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "click>=8.1,<9",
+    "ib_insync>=0.9.86,<1",
     "pydantic>=2.7,<3",
     "pyyaml>=6.0.1,<7",
 ]
+
+[project.scripts]
+trader-shawn = "trader_shawn.app:main"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2,<9",
 ]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import date
+
 from trader_shawn.domain.models import CandidateSpread, OptionQuote
+from trader_shawn.events.earnings_calendar import EarningsCalendar
 
 MIN_OPEN_INTEREST = 100
 MIN_VOLUME = 50
@@ -14,30 +18,82 @@ def build_candidates(
     ticker: str,
     dte: int,
     quotes: list[OptionQuote],
+    *,
+    earnings_calendar: EarningsCalendar | None = None,
+    as_of: date | None = None,
+) -> list[CandidateSpread]:
+    candidates: list[CandidateSpread] = []
+
+    candidates.extend(
+        _build_candidates_for_right(
+            ticker,
+            dte,
+            quotes,
+            right="P",
+            strategy="bull_put_credit_spread",
+            width_fn=lambda short_leg, long_leg: short_leg.strike - long_leg.strike,
+            earnings_calendar=earnings_calendar,
+            as_of=as_of,
+        )
+    )
+    candidates.extend(
+        _build_candidates_for_right(
+            ticker,
+            dte,
+            quotes,
+            right="C",
+            strategy="bear_call_credit_spread",
+            width_fn=lambda short_leg, long_leg: long_leg.strike - short_leg.strike,
+            earnings_calendar=earnings_calendar,
+            as_of=as_of,
+        )
+    )
+
+    return sorted(candidates, key=lambda candidate: (candidate.expiry, -candidate.credit, candidate.width))
+
+
+def _build_candidates_for_right(
+    ticker: str,
+    dte: int,
+    quotes: list[OptionQuote],
+    *,
+    right: str,
+    strategy: str,
+    width_fn: Callable[[OptionQuote, OptionQuote], float],
+    earnings_calendar: EarningsCalendar | None,
+    as_of: date | None,
 ) -> list[CandidateSpread]:
     short_leg_candidates = sorted(
         (
             quote
             for quote in quotes
             if quote.ticker == ticker
-            and quote.right == "P"
+            and quote.right == right
             and quote.delta is not None
             and MIN_ABS_DELTA <= abs(quote.delta) <= MAX_ABS_DELTA
             and quote.open_interest >= MIN_OPEN_INTEREST
             and quote.volume >= MIN_VOLUME
         ),
-        key=lambda quote: (-quote.strike, quote.expiry),
+        key=lambda quote: (quote.expiry, quote.strike),
     )
     long_leg_candidates = sorted(
-        (quote for quote in quotes if quote.ticker == ticker and quote.right == "P"),
-        key=lambda quote: (-quote.strike, quote.expiry),
+        (quote for quote in quotes if quote.ticker == ticker and quote.right == right),
+        key=lambda quote: (quote.expiry, quote.strike),
     )
 
     candidates: list[CandidateSpread] = []
     for short_leg in short_leg_candidates:
         for long_leg in long_leg_candidates:
-            width = short_leg.strike - long_leg.strike
+            width = width_fn(short_leg, long_leg)
             if short_leg.expiry != long_leg.expiry or width <= 0 or width > MAX_WIDTH:
+                continue
+
+            if _has_blocking_event(
+                ticker,
+                short_leg.expiry,
+                earnings_calendar=earnings_calendar,
+                as_of=as_of,
+            ):
                 continue
 
             short_mid = (short_leg.bid + short_leg.ask) / 2
@@ -54,7 +110,7 @@ def build_candidates(
             candidates.append(
                 CandidateSpread(
                     ticker=ticker,
-                    strategy="bull_put_credit_spread",
+                    strategy=strategy,
                     short_leg=short_leg,
                     long_leg=long_leg,
                     dte=dte,
@@ -63,9 +119,25 @@ def build_candidates(
                     width=width,
                     expiry=short_leg.expiry,
                     short_delta=short_delta,
-                    pop=1 - abs(short_delta),
+                    pop=1 - short_delta,
                     bid_ask_ratio=bid_ask_ratio,
                 )
             )
+    return candidates
 
-    return sorted(candidates, key=lambda candidate: (candidate.expiry, -candidate.credit, candidate.width))
+
+def _has_blocking_event(
+    ticker: str,
+    expiry: str,
+    *,
+    earnings_calendar: EarningsCalendar | None,
+    as_of: date | None,
+) -> bool:
+    if earnings_calendar is None:
+        return False
+    start = as_of or date.today()
+    return earnings_calendar.has_blocking_event(
+        ticker,
+        start,
+        date.fromisoformat(expiry),
+    )

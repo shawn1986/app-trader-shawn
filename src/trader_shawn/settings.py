@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter, model_validator
+from pydantic_core import PydanticCustomError
 
 
 Percent = Annotated[float, Field(gt=0, le=1)]
@@ -54,12 +55,18 @@ class AppConfigSettings(BaseModel):
     ibkr: IBKRSettings
     audit_db_path: Path
 
+    @model_validator(mode="after")
+    def validate_live_mode(self) -> "AppConfigSettings":
+        if self.mode == "live" and not self.live_enabled:
+            raise PydanticCustomError(
+                "live_mode_requires_live_enabled",
+                "live_enabled must be true when mode=live",
+                {"mode": self.mode},
+            )
+        return self
 
-class AppSettings(BaseModel):
-    mode: Literal["paper", "live"]
-    live_enabled: bool
-    ibkr: IBKRSettings
-    audit_db_path: Path
+
+class AppSettings(AppConfigSettings):
     symbols: list[str]
     risk: RiskSettings
     providers: ProviderSettings
