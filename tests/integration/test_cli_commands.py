@@ -171,6 +171,18 @@ class FakeExecutor:
         }
 
 
+class UncertainOpenExecutor(FakeExecutor):
+    def submit_open_credit_spread(
+        self,
+        spread: CandidateSpread,
+        *,
+        limit_credit: float,
+        quantity: int = 1,
+    ) -> dict[str, object]:
+        self.open_calls.append((spread, limit_credit, quantity))
+        raise RuntimeError("place order failed")
+
+
 def _runtime(
     *,
     scanner: FakeScanner | None = None,
@@ -578,6 +590,141 @@ def test_trade_command_reports_audit_error_without_masking_submitted_order(monke
         },
         "status": "submitted",
     }
+
+
+def test_trade_command_persists_uncertain_open_and_returns_anomaly(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+    audit_logger = AuditLogger(tmp_path / "audit.db")
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=FakeDecisionService(
+                decision=SimpleNamespace(
+                    action="approve",
+                    ticker="AMD",
+                    strategy="bull_put_credit_spread",
+                    expiry="2026-04-30",
+                    short_strike=160,
+                    long_strike=155,
+                    limit_credit=1.10,
+                    reason="approved",
+                )
+            ),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=1),
+            risk_guard=FakeRiskGuard(allowed=True),
+            executor=UncertainOpenExecutor(),
+            audit_logger=audit_logger,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "command": "trade",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "live_enabled": False,
+        "manual_intervention_required": True,
+        "mode": "paper",
+        "reason": "uncertain_submit_state",
+        "status": "anomaly",
+    }
+    positions = audit_logger.fetch_active_managed_positions(mode="paper")
+    assert len(positions) == 1
+    assert positions[0]["status"] == "opening"
+    assert positions[0]["broker_fingerprint"] == "AMD|2026-04-30|P|160.0|155.0|1"
+    assert audit_logger.fetch_position_events(positions[0]["position_id"])[-1]["event_type"] == (
+        "open_submit_uncertain"
+    )
+
+
+def test_trade_command_blocks_when_uncertain_open_is_unresolved(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    candidate = _spread()
+    audit_logger = AuditLogger(tmp_path / "audit.db")
+    audit_logger.upsert_managed_position(
+        {
+            "position_id": "trade-open-uncertain",
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-04-30",
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "quantity": 1,
+            "entry_credit": 1.10,
+            "entry_order_id": None,
+            "mode": "paper",
+            "status": "opening",
+            "opened_at": "2026-04-20T09:31:00+00:00",
+            "closed_at": None,
+            "last_known_debit": None,
+            "last_evaluated_at": None,
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "decision_reason": "opened by trade",
+            "risk_note": "",
+        }
+    )
+    audit_logger.record_position_event(
+        "trade-open-uncertain",
+        "open_submit_uncertain",
+        {
+            "broker_fingerprint": "AMD|2026-04-30|P|160.0|155.0|1",
+            "error": "place order failed",
+        },
+    )
+    executor = FakeExecutor()
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=FakeScanner([candidate]),
+            decision_service=FakeDecisionService(
+                decision=SimpleNamespace(
+                    action="approve",
+                    ticker="AMD",
+                    strategy="bull_put_credit_spread",
+                    expiry="2026-04-30",
+                    short_strike=160,
+                    long_strike=155,
+                    limit_credit=1.10,
+                    reason="approved",
+                )
+            ),
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=0),
+            risk_guard=FakeRiskGuard(allowed=True),
+            executor=executor,
+            audit_logger=audit_logger,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "command": "trade",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
+        "live_enabled": False,
+        "manual_intervention_required": True,
+        "mode": "paper",
+        "reason": "uncertain_submit_state",
+        "status": "anomaly",
+    }
+    assert executor.open_calls == []
 
 
 def test_trade_command_returns_no_candidates_without_fetching_account(monkeypatch) -> None:

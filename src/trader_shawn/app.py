@@ -18,7 +18,7 @@ from trader_shawn.candidate_builder.credit_spread_builder import build_candidate
 from trader_shawn.domain.enums import DecisionAction
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread, ManagedPositionRecord
 from trader_shawn.events.earnings_calendar import EarningsCalendar
-from trader_shawn.execution.ibkr_executor import IbkrExecutor
+from trader_shawn.execution.ibkr_executor import IbkrExecutor, OrderNotSubmittedError
 from trader_shawn.market_data.ibkr_market_data import IbkrMarketDataClient
 from trader_shawn.monitoring.audit_logger import AuditLogger
 from trader_shawn.monitoring.dashboard_api import read_dashboard_snapshot, update_dashboard_state
@@ -536,6 +536,15 @@ def _execute_entry_workflow(command: str, runtime: CliRuntime) -> dict[str, Any]
     )
     if position_error is not None:
         return position_error
+    uncertain_open_state = _detect_unresolved_uncertain_open_submission(
+        runtime,
+        ticker=matched_spread.ticker,
+    )
+    if uncertain_open_state is not None:
+        return {
+            **_command_envelope(command, runtime=runtime),
+            **uncertain_open_state,
+        }
 
     if runtime.risk_guard is None:
         result = {"status": "risk_rejected", "reason": "risk_guard_missing"}
@@ -567,10 +576,19 @@ def _execute_entry_workflow(command: str, runtime: CliRuntime) -> dict[str, Any]
                         **result,
                         "audit_error": audit_error,
                     }
-            except Exception as exc:
+            except OrderNotSubmittedError as exc:
                 result = _error_result(
                     status="executor_error",
                     reason="submission_failed",
+                    exc=exc,
+                )
+            except Exception as exc:
+                result = _record_uncertain_open_submission(
+                    runtime,
+                    command=command,
+                    spread=matched_spread,
+                    limit_credit=limit_credit,
+                    quantity=1,
                     exc=exc,
                 )
 
@@ -769,6 +787,107 @@ def _persist_submitted_open_position(
             "message": str(exc),
         }
     return None
+
+
+def _record_uncertain_open_submission(
+    runtime: CliRuntime,
+    *,
+    command: str,
+    spread: CandidateSpread,
+    limit_credit: float,
+    quantity: int,
+    exc: Exception,
+) -> dict[str, Any]:
+    audit_logger = getattr(runtime, "audit_logger", None)
+    fingerprint = _entry_broker_fingerprint(spread, quantity=quantity)
+    position_id = f"{command}-{uuid4().hex}"
+    upsert_managed_position = _resolve_runtime_method(
+        audit_logger,
+        "upsert_managed_position",
+    )
+
+    if upsert_managed_position is not None:
+        recorded_at = datetime.now(UTC)
+        upsert_managed_position(
+            ManagedPositionRecord(
+                position_id=position_id,
+                ticker=spread.ticker,
+                strategy=spread.strategy,
+                expiry=spread.expiry,
+                short_strike=float(spread.short_strike),
+                long_strike=float(spread.long_strike),
+                quantity=quantity,
+                entry_credit=float(limit_credit),
+                entry_order_id=None,
+                mode=runtime.settings.mode,
+                status="opening",
+                opened_at=recorded_at,
+                broker_fingerprint=fingerprint,
+                decision_reason=f"opened by {command}",
+                risk_note="manual intervention required",
+            )
+        )
+        record_position_event = _resolve_runtime_method(
+            audit_logger,
+            "record_position_event",
+        )
+        if record_position_event is not None:
+            record_position_event(
+                position_id,
+                "open_submit_uncertain",
+                {
+                    "broker_fingerprint": fingerprint,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+                created_at=recorded_at,
+            )
+
+    return {
+        "status": "anomaly",
+        "reason": "uncertain_submit_state",
+        "fingerprints": [fingerprint],
+        "manual_intervention_required": True,
+    }
+
+
+def _detect_unresolved_uncertain_open_submission(
+    runtime: CliRuntime,
+    *,
+    ticker: str,
+) -> dict[str, Any] | None:
+    if not ticker:
+        return None
+
+    audit_logger = getattr(runtime, "audit_logger", None)
+    fetch_active_positions = _resolve_runtime_method(
+        audit_logger,
+        "fetch_active_managed_positions",
+    )
+    fetch_position_events = _resolve_runtime_method(
+        audit_logger,
+        "fetch_position_events",
+    )
+    if fetch_active_positions is None or fetch_position_events is None:
+        return None
+
+    fingerprints: list[str] = []
+    for position in fetch_active_positions(mode=runtime.settings.mode):
+        if str(position.get("ticker", "")) != ticker:
+            continue
+        events = fetch_position_events(str(position["position_id"]))
+        if events and events[-1].get("event_type") == "open_submit_uncertain":
+            fingerprints.append(str(position["broker_fingerprint"]))
+
+    if not fingerprints:
+        return None
+
+    return {
+        "status": "anomaly",
+        "reason": "uncertain_submit_state",
+        "fingerprints": sorted(set(fingerprints)),
+        "manual_intervention_required": True,
+    }
 
 
 def _entry_position_id(command: str, submission: dict[str, Any]) -> str:
