@@ -372,13 +372,6 @@ def _reconcile_positions(
     managed_positions: list[dict[str, Any]],
     broker_positions: list[BrokerOptionPosition],
 ) -> dict[str, object]:
-    duplicate_fingerprints = _duplicate_saved_fingerprints(managed_positions)
-    if duplicate_fingerprints:
-        return _anomaly_result(
-            reason="unknown_broker_position",
-            fingerprints=duplicate_fingerprints,
-        )
-
     available_legs = [_broker_leg_key(position) for position in broker_positions]
     matched_positions: list[dict[str, Any]] = []
     pending_openings: list[dict[str, Any]] = []
@@ -392,14 +385,20 @@ def _reconcile_positions(
         stored_identity = _stored_identity(managed_position)
         if stored_identity != identity:
             unknown_fingerprints.add(identity[0])
+            stored_leg_keys = _stored_broker_leg_keys(managed_position)
             stored_leg_indexes = _find_stored_leg_indexes(
                 available_legs,
                 managed_position=managed_position,
             )
-            if stored_leg_indexes is not None:
-                _remove_matched_legs(available_legs, stored_leg_indexes)
+            if stored_leg_indexes is not None and stored_leg_keys is not None:
+                _consume_matched_legs(
+                    available_legs,
+                    indexes=stored_leg_indexes,
+                    expected_legs=stored_leg_keys,
+                )
             continue
 
+        expected_legs = _expected_broker_leg_keys(managed_position)
         leg_indexes = _find_matching_leg_indexes(
             available_legs,
             managed_position=managed_position,
@@ -414,7 +413,11 @@ def _reconcile_positions(
             missing_fingerprints.append(identity[0])
             continue
 
-        _remove_matched_legs(available_legs, leg_indexes)
+        _consume_matched_legs(
+            available_legs,
+            indexes=leg_indexes,
+            expected_legs=expected_legs,
+        )
         if managed_position["status"] == "opening":
             opening_to_open.append(managed_position)
             continue
@@ -509,21 +512,6 @@ def _stored_identity(
 
 def _identity_fingerprints(identities: set[tuple[str, str]]) -> list[str]:
     return sorted({fingerprint for fingerprint, _ in identities})
-
-
-def _duplicate_saved_fingerprints(
-    managed_positions: list[dict[str, Any]],
-) -> list[str]:
-    identity_counts: dict[tuple[str, str], int] = defaultdict(int)
-    for managed_position in managed_positions:
-        identity_counts[_managed_identity(managed_position)] += 1
-    return _identity_fingerprints(
-        {
-            identity
-            for identity, count in identity_counts.items()
-            if count > 1
-        }
-    )
 
 
 def _managed_fingerprint(managed_position: dict[str, Any]) -> str:
@@ -663,17 +651,64 @@ def _find_leg_index(
     for index, leg in enumerate(available_legs):
         if skip_index is not None and index == skip_index:
             continue
-        if leg == expected_leg:
+        if _leg_can_cover_expected_quantity(leg, expected_leg):
             return index
     return None
 
 
-def _remove_matched_legs(
+def _consume_matched_legs(
     available_legs: list[tuple[str, str, str, int, float]],
+    *,
     indexes: tuple[int, int],
+    expected_legs: tuple[
+        tuple[str, str, str, int, float],
+        tuple[str, str, str, int, float],
+    ],
 ) -> None:
-    for index in sorted(indexes, reverse=True):
+    indexed_expected_legs = sorted(
+        zip(indexes, expected_legs, strict=True),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    for index, expected_leg in indexed_expected_legs:
+        _consume_leg_quantity(available_legs, index, expected_quantity=expected_leg[3])
+
+
+def _leg_can_cover_expected_quantity(
+    available_leg: tuple[str, str, str, int, float],
+    expected_leg: tuple[str, str, str, int, float],
+) -> bool:
+    available_ticker, available_expiry, available_right, available_quantity, available_strike = (
+        available_leg
+    )
+    expected_ticker, expected_expiry, expected_right, expected_quantity, expected_strike = (
+        expected_leg
+    )
+    return (
+        available_ticker == expected_ticker
+        and available_expiry == expected_expiry
+        and available_right == expected_right
+        and available_strike == expected_strike
+        and (available_quantity < 0) == (expected_quantity < 0)
+        and abs(available_quantity) >= abs(expected_quantity)
+    )
+
+
+def _consume_leg_quantity(
+    available_legs: list[tuple[str, str, str, int, float]],
+    index: int,
+    *,
+    expected_quantity: int,
+) -> None:
+    ticker, expiry, right, quantity, strike = available_legs[index]
+    if quantity == 0:
         available_legs.pop(index)
+        return
+    remaining_quantity = quantity - expected_quantity
+    if remaining_quantity == 0:
+        available_legs.pop(index)
+        return
+    available_legs[index] = (ticker, expiry, right, remaining_quantity, strike)
 
 
 def _leftover_broker_fingerprints(

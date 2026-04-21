@@ -2122,7 +2122,7 @@ def test_manage_positions_does_not_submit_close_before_local_closing_state_persi
     assert second_executor.calls == [("AMD", 0.42)]
 
 
-def test_manage_positions_fails_closed_on_duplicate_identical_saved_strict_identities(
+def test_manage_positions_handles_scaled_in_duplicate_spreads_with_aggregated_broker_legs(
     tmp_path: Path,
 ) -> None:
     logger = AuditLogger(tmp_path / "audit.db")
@@ -2163,7 +2163,7 @@ def test_manage_positions_fails_closed_on_duplicate_identical_saved_strict_ident
                     ticker="AMD",
                     expiry="2026-04-30",
                     right="P",
-                    quantity=-1,
+                    quantity=-2,
                     short_strike=160.0,
                     broker_position_id="80160",
                 ),
@@ -2171,7 +2171,7 @@ def test_manage_positions_fails_closed_on_duplicate_identical_saved_strict_ident
                     ticker="AMD",
                     expiry="2026-04-30",
                     right="P",
-                    quantity=1,
+                    quantity=2,
                     short_strike=155.0,
                     broker_position_id="80155",
                 ),
@@ -2192,15 +2192,13 @@ def test_manage_positions_fails_closed_on_duplicate_identical_saved_strict_ident
 
     result = manager.manage_positions()
 
-    assert result == {
-        "status": "anomaly",
-        "reason": "unknown_broker_position",
-        "fingerprints": ["AMD|2026-04-30|P|160.0|155.0|1"],
-    }
-    assert executor.calls == []
+    assert result["status"] == "submitted"
+    assert result["position_id"] in {"pos-1", "pos-2"}
+    assert result["ticker"] == "AMD"
+    assert result["exit_reason"] == "take_profit"
+    assert executor.calls == [("AMD", 0.42)]
     positions = logger.fetch_active_managed_positions(mode="paper")
-    assert positions[0]["status"] == "open"
-    assert positions[1]["status"] == "open"
+    assert {positions[0]["status"], positions[1]["status"]} == {"open", "closing"}
 
 
 def test_manage_positions_returns_position_to_open_when_submit_fails_before_broker_submission(
