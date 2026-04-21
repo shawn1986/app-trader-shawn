@@ -114,6 +114,7 @@ def build_credit_spread_combo_order(
     limit_price: float,
 ) -> dict[str, object]:
     _validate_credit_spread_close(position)
+    _validate_limit_value(limit_price, field_name="limit_price")
     right = _option_right_for_strategy(position.strategy)
 
     return {

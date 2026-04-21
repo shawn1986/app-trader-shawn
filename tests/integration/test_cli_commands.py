@@ -114,13 +114,19 @@ class ExplodingAccountService:
 
 
 class FakePositionService:
-    def __init__(self, *, open_symbol_count: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        open_symbol_count: int = 0,
+        open_symbol_count_by_ticker: dict[str, int] | None = None,
+    ) -> None:
         self.open_symbol_count = open_symbol_count
+        self.open_symbol_count_by_ticker = dict(open_symbol_count_by_ticker or {})
         self.count_calls: list[str] = []
 
     def count_open_option_positions(self, ticker: str) -> int:
         self.count_calls.append(ticker)
-        return self.open_symbol_count
+        return self.open_symbol_count_by_ticker.get(ticker, self.open_symbol_count)
 
 
 class FakeRiskGuard:
@@ -413,6 +419,56 @@ def test_trade_command_executes_entry_workflow(monkeypatch) -> None:
     assert position_service.count_calls == ["AMD"]
     assert risk_guard.calls[0][0] is candidate
     assert executor.open_calls == [(candidate, 1.1, 1)]
+
+
+def test_trade_command_counts_positions_for_approved_candidate_ticker(monkeypatch) -> None:
+    runner = CliRunner()
+    first_candidate = _spread(ticker="AMD", short_strike=160, long_strike=155)
+    approved_candidate = _spread(ticker="NVDA", short_strike=110, long_strike=105)
+    scanner = FakeScanner([first_candidate, approved_candidate])
+    account_service = FakeAccountService(_account())
+    position_service = FakePositionService(
+        open_symbol_count_by_ticker={"AMD": 0, "NVDA": 2}
+    )
+    risk_guard = FakeRiskGuard(allowed=True)
+    executor = FakeExecutor()
+    decision_service = FakeDecisionService(
+        decision=SimpleNamespace(
+            action="approve",
+            ticker="NVDA",
+            strategy="bull_put_credit_spread",
+            expiry="2026-04-30",
+            short_strike=110,
+            long_strike=105,
+            limit_credit=1.10,
+            reason="approved",
+        )
+    )
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=scanner,
+            decision_service=decision_service,
+            account_service=account_service,
+            position_service=position_service,
+            risk_guard=risk_guard,
+            executor=executor,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+
+    assert payload["status"] == "submitted"
+    assert payload["payload"]["symbol"] == "NVDA"
+    assert position_service.count_calls == ["NVDA"]
+    assert risk_guard.calls[0][0] is approved_candidate
+    assert risk_guard.calls[0][2] == 2
+    assert executor.open_calls == [(approved_candidate, 1.1, 1)]
 
 
 def test_trade_command_returns_no_candidates_without_fetching_account(monkeypatch) -> None:

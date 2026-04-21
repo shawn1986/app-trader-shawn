@@ -83,56 +83,13 @@ def run_trade_cycle(
     risk_guard: Any | None = None,
     open_symbol_count: int = 0,
 ) -> dict[str, Any]:
-    if not candidates:
-        return {"status": "no_candidates"}
-
-    selected = candidates[0]
-    context = {
-        "ticker": selected.ticker,
-        "candidate": selected,
-        "candidates": list(candidates),
-        "account": account,
-    }
-    try:
-        decision = decision_service.decide(context)
-    except Exception as exc:
-        return _error_result(
-            status="decision_error",
-            reason="decision_service_failed",
-            exc=exc,
-        )
-
-    try:
-        action = DecisionAction(getattr(decision, "action"))
-    except (AttributeError, TypeError, ValueError):
-        return {
-            "status": "decision_error",
-            "reason": "invalid_action",
-            "action": getattr(decision, "action", None),
-        }
-    if action is not DecisionAction.APPROVE:
-        return {
-            "status": "decision_rejected",
-            "reason": getattr(decision, "reason", ""),
-            "action": action.value,
-        }
-
-    try:
-        approved_candidate_key = _approved_candidate_key(decision)
-        limit_credit = _decision_limit_credit(decision)
-    except (AttributeError, TypeError, ValueError) as exc:
-        return _error_result(
-            status="decision_error",
-            reason="invalid_approval",
-            exc=exc,
-        )
-
-    matched_spread = _resolve_approved_candidate(candidates, approved_candidate_key)
-    if matched_spread is None:
-        return {
-            "status": "decision_rejected",
-            "reason": "approved_candidate_not_found",
-        }
+    terminal_result, matched_spread, limit_credit = _resolve_trade_decision(
+        candidates=candidates,
+        account=account,
+        decision_service=decision_service,
+    )
+    if terminal_result is not None:
+        return terminal_result
 
     if risk_guard is None:
         return {"status": "risk_rejected", "reason": "risk_guard_missing"}
@@ -157,6 +114,86 @@ def run_trade_cycle(
             reason="submission_failed",
             exc=exc,
         )
+
+
+def _resolve_trade_decision(
+    *,
+    candidates: Sequence[CandidateSpread],
+    account: AccountSnapshot,
+    decision_service: Any,
+) -> tuple[dict[str, Any] | None, CandidateSpread | None, float | None]:
+    if not candidates:
+        return {"status": "no_candidates"}, None, None
+
+    selected = candidates[0]
+    context = {
+        "ticker": selected.ticker,
+        "candidate": selected,
+        "candidates": list(candidates),
+        "account": account,
+    }
+    try:
+        decision = decision_service.decide(context)
+    except Exception as exc:
+        return (
+            _error_result(
+                status="decision_error",
+                reason="decision_service_failed",
+                exc=exc,
+            ),
+            None,
+            None,
+        )
+
+    try:
+        action = DecisionAction(getattr(decision, "action"))
+    except (AttributeError, TypeError, ValueError):
+        return (
+            {
+                "status": "decision_error",
+                "reason": "invalid_action",
+                "action": getattr(decision, "action", None),
+            },
+            None,
+            None,
+        )
+    if action is not DecisionAction.APPROVE:
+        return (
+            {
+                "status": "decision_rejected",
+                "reason": getattr(decision, "reason", ""),
+                "action": action.value,
+            },
+            None,
+            None,
+        )
+
+    try:
+        approved_candidate_key = _approved_candidate_key(decision)
+        limit_credit = _decision_limit_credit(decision)
+    except (AttributeError, TypeError, ValueError) as exc:
+        return (
+            _error_result(
+                status="decision_error",
+                reason="invalid_approval",
+                exc=exc,
+            ),
+            None,
+            None,
+        )
+
+    matched_spread = _resolve_approved_candidate(candidates, approved_candidate_key)
+    if matched_spread is None:
+        return (
+            {
+                "status": "decision_rejected",
+                "reason": "approved_candidate_not_found",
+            },
+            None,
+            None,
+        )
+
+    return None, matched_spread, limit_credit
 
 
 @click.group(name="trader-shawn")
@@ -476,22 +513,49 @@ def _execute_entry_workflow(command: str, runtime: CliRuntime) -> dict[str, Any]
     if account_error is not None:
         return account_error
 
+    decision_result, matched_spread, limit_credit = _resolve_trade_decision(
+        candidates=candidates,
+        account=account,
+        decision_service=runtime.decision_service,
+    )
+    if decision_result is not None:
+        return {
+            **_command_envelope(command, runtime=runtime),
+            **_json_safe(decision_result),
+        }
+
     open_symbol_count, position_error = _count_open_symbol_positions(
         runtime,
-        ticker=candidates[0].ticker if candidates else "",
+        ticker=matched_spread.ticker,
         command=command,
     )
     if position_error is not None:
         return position_error
 
-    result = run_trade_cycle(
-        candidates=candidates,
-        account=account,
-        decision_service=runtime.decision_service,
-        executor=runtime.executor,
-        risk_guard=runtime.risk_guard,
-        open_symbol_count=open_symbol_count,
-    )
+    if runtime.risk_guard is None:
+        result = {"status": "risk_rejected", "reason": "risk_guard_missing"}
+    else:
+        guard_result = runtime.risk_guard.evaluate(
+            matched_spread,
+            account,
+            open_symbol_count,
+        )
+        if not guard_result.allowed:
+            result = {"status": "risk_rejected", "reason": guard_result.reason}
+        else:
+            try:
+                result = runtime.executor.submit_open_credit_spread(
+                    matched_spread,
+                    limit_credit=limit_credit,
+                    quantity=1,
+                )
+            except Exception as exc:
+                result = _error_result(
+                    status="executor_error",
+                    reason="submission_failed",
+                    exc=exc,
+                )
+
     return {
         **_command_envelope(command, runtime=runtime),
         **_json_safe(result),

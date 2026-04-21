@@ -17,6 +17,7 @@ from trader_shawn.execution.ibkr_executor import IbkrExecutor, OrderNotSubmitted
 from trader_shawn.execution.order_builder import build_credit_spread_combo_order
 from trader_shawn.positions.manager import PositionManager, evaluate_exit
 from datetime import UTC, date, datetime
+import math
 
 
 def test_audit_logger_persists_and_updates_managed_position(tmp_path: Path) -> None:
@@ -645,6 +646,27 @@ def test_build_credit_spread_combo_order_rejects_invalid_inputs(
 
     with pytest.raises(ValueError, match=message):
         build_credit_spread_combo_order(position, limit_price=0.45)
+
+
+@pytest.mark.parametrize("limit_price", [0.0, -0.01, math.inf, math.nan])
+def test_build_credit_spread_combo_order_rejects_invalid_limit_price(
+    limit_price: float,
+) -> None:
+    position = PositionSnapshot(
+        ticker="AMD",
+        strategy="bull_put_credit_spread",
+        expiry="2026-04-30",
+        short_strike=160,
+        long_strike=155,
+        entry_credit=1.00,
+        current_debit=0.45,
+        dte=9,
+        short_leg_distance_pct=0.08,
+        quantity=2,
+    )
+
+    with pytest.raises(ValueError, match="limit_price must be a positive finite number"):
+        build_credit_spread_combo_order(position, limit_price=limit_price)
 
 
 @pytest.mark.parametrize(
