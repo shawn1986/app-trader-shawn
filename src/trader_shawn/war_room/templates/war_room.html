@@ -6,11 +6,28 @@
     <title>War Room</title>
     <link rel="stylesheet" href="/static/war_room.css">
 </head>
-<body data-mode="monitoring">
+<body data-mode="monitoring" data-threat="nominal">
     <main class="war-room">
         <section class="panel command-status">
             <h2>Command Status</h2>
             <p>Core systems online. Monitoring live operations.</p>
+            <div class="arm-controls">
+                <label for="arm-phrase">Authorization Phrase</label>
+                <div class="arm-row">
+                    <input id="arm-phrase" type="text" data-arm-input autocomplete="off" placeholder="Type ARM">
+                    <button type="button" data-arm-submit>Unlock</button>
+                </div>
+            </div>
+            <div class="command-grid">
+                <button type="button" data-command="scan" disabled>Scan</button>
+                <button type="button" data-command="decide" disabled>Decide</button>
+                <button type="button" data-command="manage" disabled>Manage</button>
+                <button type="button" data-command="trade" disabled>Trade</button>
+            </div>
+            <section class="trade-confirm" data-trade-confirm hidden>
+                <p>Trade command staged. Confirm to execute.</p>
+                <button type="button" data-trade-confirm-submit>Confirm Trade</button>
+            </section>
         </section>
         <section class="panel risk-deck">
             <h2>Risk Deck</h2>
@@ -19,9 +36,12 @@
         <section class="panel hot-positions">
             <h2>Hot Positions</h2>
             <p>Highest-priority positions and anomalies appear in this panel.</p>
+            <h2 class="mission-heading">Mission Log</h2>
+            <ul class="mission-log" data-mission-log></ul>
         </section>
         <section class="panel threat-rail">
             <h2>Threat Rail</h2>
+            <p>Threat Level: <strong data-threat-level>Nominal</strong></p>
             <p>Type ARM to unlock</p>
         </section>
     </main>
