@@ -246,8 +246,18 @@ class FakeMarketDataClient:
 
 class FakeExecutionClient:
     def __init__(self) -> None:
+        self.connected = False
+        self.connect_calls: list[tuple[str, int, int]] = []
         self.qualified_contracts: list[object] = []
         self.placed_orders: list[tuple[object, object]] = []
+
+    def isConnected(self) -> bool:
+        return self.connected
+
+    def connect(self, host: str, port: int, clientId: int) -> "FakeExecutionClient":
+        self.connected = True
+        self.connect_calls.append((host, port, clientId))
+        return self
 
     def qualifyContracts(self, *contracts: object) -> list[object]:
         self.qualified_contracts.extend(contracts)
@@ -353,6 +363,19 @@ def test_ibkr_market_data_client_ensures_connection_before_live_requests() -> No
 
     assert returned is ib_client
     assert ib_client.connect_calls == [("127.0.0.1", 7497, 17)]
+
+
+def test_ibkr_market_data_client_defaults_to_ib_gateway_paper_port() -> None:
+    ib_client = FakeMarketDataClient()
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+        client_id=17,
+    )
+
+    client.ensure_connected()
+
+    assert ib_client.connect_calls == [("127.0.0.1", 4002, 17)]
 
 
 def test_ibkr_market_data_client_fetches_bounded_option_snapshots_for_runtime_wiring() -> None:
@@ -553,6 +576,31 @@ def test_ibkr_executor_submit_limit_combo_returns_broker_fingerprint() -> None:
     result = executor.submit_limit_combo(position, limit_price=0.63)
 
     assert result["broker_fingerprint"] == "AMD|2026-04-30|P|160.0|155.0|1"
+
+
+def test_ibkr_executor_defaults_to_ib_gateway_paper_port() -> None:
+    executor = IbkrExecutor(client=FakeExecutionClient(), ibkr_module=FakeIbModule(), client_id=23)
+
+    executor.submit_open_credit_spread(
+        CandidateSpread(
+            ticker="AMD",
+            strategy="bull_put_credit_spread",
+            expiry="2026-04-30",
+            dte=10,
+            short_strike=160,
+            long_strike=155,
+            width=5,
+            credit=1.05,
+            max_loss=395,
+            short_delta=0.2,
+            pop=0.8,
+            bid_ask_ratio=0.07,
+        ),
+        limit_credit=1.05,
+        quantity=1,
+    )
+
+    assert executor._client.connect_calls == [("127.0.0.1", 4002, 23)]
 
 
 def test_extract_delta_falls_back_to_model_greeks_when_bid_delta_missing() -> None:

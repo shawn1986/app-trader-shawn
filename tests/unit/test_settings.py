@@ -17,7 +17,7 @@ def write_config(
 ) -> None:
     (config_dir / "app.yaml").write_text(
         app
-        or "mode: paper\nlive_enabled: false\nibkr:\n  host: 127.0.0.1\n  port: 7497\n  client_id: 7\naudit_db_path: runtime/audit.db\n",
+        or "mode: paper\nlive_enabled: false\nibkr:\n  host: 127.0.0.1\n  port: 4002\n  client_id: 7\naudit_db_path: runtime/audit.db\n",
         encoding="utf-8",
     )
     (config_dir / "symbols.yaml").write_text(
@@ -62,6 +62,20 @@ def test_load_settings_merges_yaml_and_env(monkeypatch, tmp_path: Path) -> None:
     assert settings.risk.max_risk_per_trade_pct == 0.02
     assert settings.providers.primary_provider == "claude_cli"
     assert settings.audit_db_path == tmp_path / "runtime" / "audit.db"
+
+
+def test_load_settings_uses_ib_gateway_paper_default_port(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    write_config(config_dir)
+
+    settings = load_settings(config_dir)
+
+    assert settings.mode == "paper"
+    assert settings.live_enabled is False
+    assert settings.ibkr.host == "127.0.0.1"
+    assert settings.ibkr.port == 4002
+    assert settings.ibkr.client_id == 7
 
 
 def test_load_settings_rejects_invalid_boolean_env(monkeypatch, tmp_path: Path) -> None:
@@ -176,7 +190,7 @@ def test_load_settings_rejects_invalid_mode_from_app_yaml(tmp_path: Path) -> Non
     config_dir.mkdir()
     write_config(
         config_dir,
-        app="mode: dry_run\nlive_enabled: false\nibkr:\n  host: 127.0.0.1\n  port: 7497\n  client_id: 7\naudit_db_path: runtime/audit.db\n",
+        app="mode: dry_run\nlive_enabled: false\nibkr:\n  host: 127.0.0.1\n  port: 4002\n  client_id: 7\naudit_db_path: runtime/audit.db\n",
     )
 
     with pytest.raises(ValidationError, match="mode"):

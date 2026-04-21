@@ -353,7 +353,7 @@ def _settings(*, symbols: list[str] | None = None) -> SimpleNamespace:
             provider_timeout_seconds=15,
             secondary_timeout_seconds=10,
         ),
-        ibkr=SimpleNamespace(host="127.0.0.1", port=7497),
+        ibkr=SimpleNamespace(host="127.0.0.1", port=4002),
     )
 
 

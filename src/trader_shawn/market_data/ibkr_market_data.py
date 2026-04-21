@@ -18,7 +18,7 @@ class IbkrMarketDataClient:
         self,
         *,
         host: str = "127.0.0.1",
-        port: int = 7497,
+        port: int = 4002,
         client_id: int = 7,
         client: Any | None = None,
         ib: Any | None = None,

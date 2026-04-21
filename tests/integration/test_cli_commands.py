@@ -70,7 +70,7 @@ def _settings(*, symbols: list[str] | None = None) -> SimpleNamespace:
         ),
         ibkr=SimpleNamespace(
             host="127.0.0.1",
-            port=7497,
+            port=4002,
             client_id=12,
         ),
         events=[],
