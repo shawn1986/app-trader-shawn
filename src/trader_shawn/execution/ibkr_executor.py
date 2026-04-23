@@ -177,6 +177,14 @@ class IbkrExecutor:
             connect(self._host, self._port, clientId=self._client_id)
         return client
 
+    def disconnect(self) -> None:
+        client = self._client
+        if client is None:
+            return
+        disconnect = getattr(client, "disconnect", None)
+        if callable(disconnect):
+            disconnect()
+
     def _resolve_client(self) -> Any:
         if self._client is not None:
             return self._client

@@ -29,6 +29,8 @@ class FakeOption:
     right: str
     exchange: str
     currency: str
+    tradingClass: str = ""
+    multiplier: str = ""
     conId: int = 0
     secType: str = "OPT"
 
@@ -97,12 +99,31 @@ class FakeMarketDataClient:
         self,
         *,
         quote_overrides: dict[tuple[str, float], dict[str, object]] | None = None,
+        expirations: set[str] | None = None,
+        strikes: list[float] | None = None,
+        spot_price: float = 101.25,
+        historical_close: float | None = None,
+        valid_option_keys: set[tuple[str, float, str]] | None = None,
     ) -> None:
         self.connected = False
         self.connect_calls: list[tuple[str, int, int]] = []
         self.qualified_contracts: list[object] = []
         self.ticker_requests: list[list[object]] = []
+        self.market_data_type_requests: list[int] = []
+        self.disconnect_calls = 0
+        self.historical_requests: list[object] = []
+        self.contract_detail_requests: list[object] = []
         self.quote_overrides = quote_overrides or {}
+        self.expirations = expirations or {
+            "2026-04-25",
+            "2026-04-30",
+            "2026-05-08",
+            "2026-05-20",
+        }
+        self.strikes = strikes or [95.0, 100.0]
+        self.spot_price = spot_price
+        self.historical_close = historical_close
+        self.valid_option_keys = valid_option_keys
 
     def isConnected(self) -> bool:
         return self.connected
@@ -111,6 +132,13 @@ class FakeMarketDataClient:
         self.connected = True
         self.connect_calls.append((host, port, clientId))
         return self
+
+    def disconnect(self) -> None:
+        self.connected = False
+        self.disconnect_calls += 1
+
+    def reqMarketDataType(self, market_data_type: int) -> None:
+        self.market_data_type_requests.append(market_data_type)
 
     def qualifyContracts(self, *contracts: object) -> list[object]:
         self.qualified_contracts.extend(contracts)
@@ -132,11 +160,11 @@ class FakeMarketDataClient:
             return [
                 SimpleNamespace(
                     contract=contracts[0],
-                    marketPrice=lambda: 101.25,
-                    last=101.25,
-                    close=100.9,
-                    bid=101.2,
-                    ask=101.3,
+                    marketPrice=lambda: self.spot_price,
+                    last=self.spot_price,
+                    close=self.spot_price,
+                    bid=self.spot_price - 0.05,
+                    ask=self.spot_price + 0.05,
                 )
             ]
 
@@ -173,6 +201,39 @@ class FakeMarketDataClient:
             tickers.append(SimpleNamespace(**ticker_fields))
         return tickers
 
+    def reqHistoricalData(self, contract: object, **kwargs: object) -> list[object]:
+        self.historical_requests.append(contract)
+        if self.historical_close is None:
+            return []
+        return [SimpleNamespace(close=self.historical_close)]
+
+    def reqContractDetails(self, contract: object) -> list[object]:
+        self.contract_detail_requests.append(contract)
+        expiry = str(getattr(contract, "lastTradeDateOrContractMonth", ""))
+        requested_right = str(getattr(contract, "right", "")).upper()
+        rights = [requested_right] if requested_right in {"P", "C"} else ["P", "C"]
+        details: list[object] = []
+        for strike in self.strikes:
+            for right in rights:
+                key = (expiry, float(strike), right)
+                if self.valid_option_keys is not None and key not in self.valid_option_keys:
+                    continue
+                details.append(
+                    SimpleNamespace(
+                        contract=FakeOption(
+                            symbol=str(getattr(contract, "symbol", "AMD")),
+                            lastTradeDateOrContractMonth=expiry,
+                            strike=float(strike),
+                            right=right,
+                            exchange=str(getattr(contract, "exchange", "SMART")),
+                            currency=str(getattr(contract, "currency", "USD")),
+                            tradingClass=str(getattr(contract, "tradingClass", "AMD")),
+                            multiplier=str(getattr(contract, "multiplier", "100")),
+                        )
+                    )
+                )
+        return details
+
     def reqSecDefOptParams(
         self,
         underlyingSymbol: str,
@@ -187,14 +248,10 @@ class FakeMarketDataClient:
         return [
             SimpleNamespace(
                 exchange="SMART",
-                expirations={
-                    "2026-04-25",
-                    "2026-04-30",
-                    "2026-05-08",
-                    "2026-05-20",
-                },
-                strikes=[95.0, 100.0],
+                expirations=self.expirations,
+                strikes=self.strikes,
                 tradingClass="AMD",
+                multiplier="100",
             )
         ]
 
@@ -250,6 +307,7 @@ class FakeExecutionClient:
         self.connect_calls: list[tuple[str, int, int]] = []
         self.qualified_contracts: list[object] = []
         self.placed_orders: list[tuple[object, object]] = []
+        self.disconnect_calls = 0
 
     def isConnected(self) -> bool:
         return self.connected
@@ -258,6 +316,10 @@ class FakeExecutionClient:
         self.connected = True
         self.connect_calls.append((host, port, clientId))
         return self
+
+    def disconnect(self) -> None:
+        self.connected = False
+        self.disconnect_calls += 1
 
     def qualifyContracts(self, *contracts: object) -> list[object]:
         self.qualified_contracts.extend(contracts)
@@ -376,6 +438,82 @@ def test_ibkr_market_data_client_defaults_to_ib_gateway_paper_port() -> None:
     client.ensure_connected()
 
     assert ib_client.connect_calls == [("127.0.0.1", 4002, 17)]
+
+
+def test_ibkr_market_data_client_requests_delayed_market_data_type() -> None:
+    ib_client = FakeMarketDataClient()
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+        market_data_type="delayed",
+    )
+
+    client.fetch_underlying_spot("AMD")
+
+    assert ib_client.market_data_type_requests == [3]
+
+
+def test_ibkr_market_data_client_skips_underlying_quote_for_delayed_option_scan() -> None:
+    ib_client = FakeMarketDataClient()
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+        market_data_type="delayed",
+    )
+
+    client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P",),
+        as_of=date(2026, 4, 20),
+    )
+
+    assert ib_client.ticker_requests
+    assert all(
+        getattr(contract, "secType", "") != "STK"
+        for request in ib_client.ticker_requests
+        for contract in request
+    )
+    assert ib_client.historical_requests == []
+
+
+def test_ibkr_market_data_client_uses_historical_close_for_live_option_scan() -> None:
+    ib_client = FakeMarketDataClient(
+        historical_close=100.0,
+        strikes=[50.0, 90.0, 95.0, 100.0, 105.0, 110.0, 150.0],
+    )
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+    )
+
+    quotes = client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P",),
+        as_of=date(2026, 4, 20),
+        strike_window_pct=0.10,
+    )
+
+    assert ib_client.historical_requests
+    assert {quote.strike for quote in quotes} == {90.0, 95.0, 100.0, 105.0, 110.0}
+
+
+def test_ibkr_market_data_client_disconnects_underlying_client() -> None:
+    ib_client = FakeMarketDataClient()
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+        market_data_type="delayed",
+    )
+
+    client.ensure_connected()
+    client.disconnect()
+
+    assert ib_client.disconnect_calls == 1
+    assert ib_client.isConnected() is False
 
 
 def test_ibkr_market_data_client_fetches_bounded_option_snapshots_for_runtime_wiring() -> None:
@@ -527,6 +665,225 @@ def test_ibkr_market_data_client_materializes_rights_iterators_once() -> None:
     assert len(quotes) == 8
     assert {quote.right for quote in quotes} == {"P", "C"}
     assert len(ib_client.ticker_requests[-1]) == 8
+
+
+def test_ibkr_market_data_client_limits_option_scan_strikes_around_spot() -> None:
+    ib_client = FakeMarketDataClient(
+        spot_price=100.0,
+        strikes=[50.0, 75.0, 90.0, 95.0, 100.0, 105.0, 110.0, 125.0, 150.0],
+    )
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+    )
+
+    quotes = client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P",),
+        as_of=date(2026, 4, 20),
+        strike_window_pct=0.10,
+    )
+
+    assert {quote.strike for quote in quotes} == {90.0, 95.0, 100.0, 105.0, 110.0}
+    assert {
+        float(getattr(contract, "strike"))
+        for contract in ib_client.qualified_contracts
+        if getattr(contract, "secType", "") == "OPT"
+    } == {90.0, 95.0, 100.0, 105.0, 110.0}
+
+
+def test_ibkr_market_data_client_keeps_closest_strikes_when_window_is_empty() -> None:
+    ib_client = FakeMarketDataClient(
+        spot_price=100.0,
+        strikes=[10.0, 20.0, 500.0],
+    )
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+    )
+
+    quotes = client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P",),
+        as_of=date(2026, 4, 20),
+        strike_window_pct=0.01,
+        fallback_strike_count=2,
+    )
+
+    assert {quote.strike for quote in quotes} == {20.0, 10.0}
+
+
+def test_ibkr_market_data_client_caps_scan_strikes_even_inside_window() -> None:
+    ib_client = FakeMarketDataClient(
+        spot_price=100.0,
+        strikes=[90.0, 95.0, 100.0, 105.0, 110.0],
+    )
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+    )
+
+    quotes = client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P",),
+        as_of=date(2026, 4, 20),
+        strike_window_pct=0.20,
+        fallback_strike_count=3,
+    )
+
+    assert {quote.strike for quote in quotes} == {95.0, 100.0, 105.0}
+
+
+def test_ibkr_market_data_client_uses_bounded_middle_strikes_when_spot_unavailable() -> None:
+    ib_client = FakeMarketDataClient(
+        spot_price=math.nan,
+        strikes=[70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0],
+    )
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+    )
+
+    quotes = client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P",),
+        as_of=date(2026, 4, 20),
+        fallback_strike_count=3,
+    )
+
+    assert {quote.strike for quote in quotes} == {90.0, 100.0, 110.0}
+
+
+def test_ibkr_market_data_client_uses_smaller_default_contract_set_when_spot_unavailable() -> None:
+    ib_client = FakeMarketDataClient(
+        spot_price=math.nan,
+        strikes=[float(value) for value in range(10, 31)],
+    )
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+        market_data_type="delayed",
+    )
+
+    client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P", "C"),
+        as_of=date(2026, 4, 20),
+    )
+
+    option_contracts = [
+        contract
+        for contract in ib_client.qualified_contracts
+        if getattr(contract, "secType", "") == "OPT"
+    ]
+    assert len(option_contracts) == 8
+
+
+def test_ibkr_market_data_client_uses_contract_details_to_skip_invalid_combinations() -> None:
+    ib_client = FakeMarketDataClient(
+        historical_close=100.0,
+        expirations={"2026-04-30", "2026-05-08"},
+        strikes=[90.0, 95.0, 100.0, 105.0, 110.0],
+        valid_option_keys={
+            ("20260430", 95.0, "P"),
+            ("20260430", 100.0, "C"),
+            ("20260508", 105.0, "P"),
+        },
+    )
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+        market_data_type="delayed",
+    )
+
+    quotes = client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P", "C"),
+        as_of=date(2026, 4, 20),
+        strike_window_pct=0.15,
+        max_expiries=2,
+    )
+
+    assert ib_client.contract_detail_requests
+    assert {
+        (
+            quote.expiry.replace("-", ""),
+            quote.strike,
+            quote.right,
+        )
+        for quote in quotes
+    } == {
+        ("20260430", 95.0, "P"),
+        ("20260430", 100.0, "C"),
+        ("20260508", 105.0, "P"),
+    }
+
+
+def test_ibkr_market_data_client_limits_default_expiry_scan_count() -> None:
+    ib_client = FakeMarketDataClient(
+        expirations={
+            "2026-04-30",
+            "2026-05-01",
+            "2026-05-04",
+            "2026-05-08",
+        },
+        strikes=[95.0],
+    )
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+        market_data_type="delayed",
+    )
+
+    client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P",),
+        as_of=date(2026, 4, 20),
+    )
+
+    assert [
+        request.lastTradeDateOrContractMonth
+        for request in ib_client.contract_detail_requests
+    ] == ["20260430"]
+
+
+def test_ibkr_market_data_client_includes_chain_trading_class_and_multiplier() -> None:
+    ib_client = FakeMarketDataClient()
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+    )
+
+    client.fetch_option_quotes(
+        "AMD",
+        min_dte=7,
+        max_dte=21,
+        rights=("P",),
+        as_of=date(2026, 4, 20),
+    )
+
+    option_contracts = [
+        contract
+        for contract in ib_client.qualified_contracts
+        if getattr(contract, "secType", "") == "OPT"
+    ]
+    assert option_contracts
+    assert {contract.tradingClass for contract in option_contracts} == {"AMD"}
+    assert {contract.multiplier for contract in option_contracts} == {"100"}
 
 
 def test_ibkr_market_data_client_drops_quotes_with_missing_bid_or_ask() -> None:
@@ -742,6 +1099,17 @@ def test_ibkr_executor_defaults_to_ib_gateway_paper_port() -> None:
     )
 
     assert executor._client.connect_calls == [("127.0.0.1", 4002, 23)]
+
+
+def test_ibkr_executor_disconnects_underlying_client() -> None:
+    ib_client = FakeExecutionClient()
+    executor = IbkrExecutor(client=ib_client, ibkr_module=FakeIbModule())
+
+    executor._ensure_connected()
+    executor.disconnect()
+
+    assert ib_client.disconnect_calls == 1
+    assert ib_client.isConnected() is False
 
 
 def test_extract_delta_falls_back_to_model_greeks_when_bid_delta_missing() -> None:

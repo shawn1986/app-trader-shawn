@@ -57,7 +57,17 @@ class CliScanner:
         as_of = date.today()
         candidates: list[CandidateSpread] = []
         for symbol in symbols:
+            market_data_type = getattr(
+                self._market_data_client,
+                "market_data_type",
+                getattr(self._market_data_client, "_market_data_type", "unknown"),
+            )
+            click.echo(
+                f"scan: fetching {symbol} option quotes ({market_data_type} market data)",
+                err=True,
+            )
             quotes = self._market_data_client.fetch_option_quotes(symbol)
+            click.echo(f"scan: {symbol} returned {len(quotes)} option quotes", err=True)
             quotes_by_expiry: dict[str, list[Any]] = {}
             for quote in quotes:
                 quotes_by_expiry.setdefault(quote.expiry, []).append(quote)
@@ -316,6 +326,7 @@ def build_cli_runtime() -> CliRuntime:
         host=settings.ibkr.host,
         port=settings.ibkr.port,
         client_id=market_data_client_id,
+        market_data_type=settings.market_data_type,
     )
     earnings_calendar = EarningsCalendar(settings.events)
     executor = IbkrExecutor(
@@ -353,8 +364,11 @@ def _trade_cycle_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
-    result = _execute_entry_workflow("trade-cycle", runtime)
-    return _with_dashboard_error(result, _update_dashboard_snapshot(runtime, result))
+    try:
+        result = _execute_entry_workflow("trade-cycle", runtime)
+        return _with_dashboard_error(result, _update_dashboard_snapshot(runtime, result))
+    finally:
+        _disconnect_runtime(runtime)
 
 
 def run_cli_command_with_runtime(command: str, runtime: CliRuntime) -> dict[str, Any]:
@@ -373,7 +387,10 @@ def _scan_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
-    return _scan_command_with_runtime(runtime)
+    try:
+        return _scan_command_with_runtime(runtime)
+    finally:
+        _disconnect_runtime(runtime)
 
 
 def _scan_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
@@ -392,7 +409,10 @@ def _decide_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
-    return _decide_command_with_runtime(runtime)
+    try:
+        return _decide_command_with_runtime(runtime)
+    finally:
+        _disconnect_runtime(runtime)
 
 
 def _decide_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
@@ -423,7 +443,10 @@ def _trade_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
-    return _trade_command_with_runtime(runtime)
+    try:
+        return _trade_command_with_runtime(runtime)
+    finally:
+        _disconnect_runtime(runtime)
 
 
 def _trade_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
@@ -435,7 +458,10 @@ def _manage_command() -> dict[str, Any]:
     runtime, error = _load_command_runtime()
     if error is not None:
         return error
-    return _manage_command_with_runtime(runtime)
+    try:
+        return _manage_command_with_runtime(runtime)
+    finally:
+        _disconnect_runtime(runtime)
 
 
 def _manage_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
@@ -513,6 +539,39 @@ def _load_command_runtime() -> tuple[CliRuntime | None, dict[str, Any] | None]:
             "message": str(exc),
             "config_dir": str(config_dir),
         }
+
+
+def _disconnect_runtime(runtime: CliRuntime) -> None:
+    seen: set[int] = set()
+    for service in (
+        getattr(runtime, "scanner", None),
+        getattr(runtime, "account_service", None),
+        getattr(runtime, "position_service", None),
+        getattr(runtime, "executor", None),
+        getattr(runtime, "position_manager", None),
+    ):
+        _disconnect_service(service, seen=seen)
+
+
+def _disconnect_service(service: Any, *, seen: set[int]) -> None:
+    if service is None:
+        return
+    service_id = id(service)
+    if service_id in seen:
+        return
+    seen.add(service_id)
+
+    disconnect = getattr(service, "disconnect", None)
+    if callable(disconnect):
+        try:
+            disconnect()
+        except Exception:
+            pass
+
+    for attr_name in ("_market_data_client", "_executor", "_market_data"):
+        child = getattr(service, attr_name, None)
+        if child is not None:
+            _disconnect_service(child, seen=seen)
 
 
 def _command_envelope(

@@ -1,5 +1,6 @@
 mode: paper
 live_enabled: false
+market_data_type: delayed
 ibkr:
   host: 127.0.0.1
   port: 4002

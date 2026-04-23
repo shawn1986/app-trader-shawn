@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from click.testing import CliRunner
 
 import trader_shawn.app as app_module
@@ -51,6 +52,7 @@ def _settings(*, symbols: list[str] | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         mode="paper",
         live_enabled=False,
+        market_data_type="live",
         symbols=symbols or ["SPY", "QQQ", "AMD"],
         risk=SimpleNamespace(
             max_risk_per_trade_pct=0.02,
@@ -169,6 +171,17 @@ class FakeExecutor:
                 "quantity": quantity,
             },
         }
+
+
+class DisconnectingService:
+    def __init__(self, *, raise_on_disconnect: bool = False) -> None:
+        self.disconnect_calls = 0
+        self.raise_on_disconnect = raise_on_disconnect
+
+    def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        if self.raise_on_disconnect:
+            raise RuntimeError("disconnect failed")
 
 
 class UncertainOpenExecutor(FakeExecutor):
@@ -360,6 +373,112 @@ def test_scan_command_executes_runtime_scan_and_returns_candidates(monkeypatch) 
     assert payload["candidates"][0]["ticker"] == "AMD"
     assert payload["candidates"][1]["ticker"] == "NVDA"
     assert scanner.calls == [["SPY", "QQQ", "AMD"]]
+
+
+def test_scan_command_disconnects_runtime_services_once(monkeypatch) -> None:
+    runner = CliRunner()
+    shared_service = DisconnectingService()
+    executor = DisconnectingService()
+    scanner = FakeScanner([])
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=scanner,
+            account_service=shared_service,
+            position_service=shared_service,
+            executor=executor,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["scan"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["status"] == "ok"
+    assert shared_service.disconnect_calls == 1
+    assert executor.disconnect_calls == 1
+
+
+def test_scan_command_preserves_result_when_disconnect_fails(monkeypatch) -> None:
+    runner = CliRunner()
+    broken_service = DisconnectingService(raise_on_disconnect=True)
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(scanner=FakeScanner([]), account_service=broken_service),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["scan"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["status"] == "ok"
+    assert broken_service.disconnect_calls == 1
+
+
+@pytest.mark.parametrize("command", ["decide", "trade", "trade-cycle"])
+def test_entry_commands_disconnect_scanner_market_data_child(
+    command: str,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    scanner = FakeScanner([_spread()])
+    market_data_client = DisconnectingService()
+    scanner._market_data_client = market_data_client
+    runtime_kwargs: dict[str, object] = {
+        "scanner": scanner,
+        "decision_service": FakeDecisionService(
+            decision=SimpleNamespace(
+                action="approve",
+                ticker="AMD",
+                strategy="bull_put_credit_spread",
+                expiry="2026-04-30",
+                short_strike=160,
+                long_strike=155,
+                limit_credit=1.05,
+                reason="looks good",
+            )
+        ),
+    }
+    if command in {"trade", "trade-cycle"}:
+        runtime_kwargs.update(
+            account_service=FakeAccountService(_account()),
+            position_service=FakePositionService(open_symbol_count=0),
+            risk_guard=FakeRiskGuard(allowed=True),
+            executor=FakeExecutor(),
+            dashboard_state_path=tmp_path / "dashboard.json",
+        )
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(**runtime_kwargs),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, [command])
+
+    assert result.exit_code == 0
+    assert market_data_client.disconnect_calls == 1
+
+
+def test_manage_command_disconnects_position_manager(monkeypatch) -> None:
+    runner = CliRunner()
+    manager = DisconnectingService()
+    manager.manage_positions = lambda: {"status": "ok", "managed_count": 0}
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(position_manager=manager),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["manage"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["status"] == "ok"
+    assert manager.disconnect_calls == 1
 
 
 def test_decide_command_executes_scan_then_decision(monkeypatch) -> None:

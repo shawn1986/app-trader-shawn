@@ -52,6 +52,7 @@ class EventsSettings(BaseModel):
 class AppConfigSettings(BaseModel):
     mode: Literal["paper", "live"]
     live_enabled: bool
+    market_data_type: Literal["live", "delayed"] = "live"
     ibkr: IBKRSettings
     audit_db_path: Path
 
@@ -62,6 +63,12 @@ class AppConfigSettings(BaseModel):
                 "live_mode_requires_live_enabled",
                 "live_enabled must be true when mode=live",
                 {"mode": self.mode},
+            )
+        if self.mode == "live" and self.market_data_type != "live":
+            raise PydanticCustomError(
+                "live_mode_requires_live_market_data",
+                "market_data_type must be live when mode=live",
+                {"mode": self.mode, "market_data_type": self.market_data_type},
             )
         return self
 
@@ -114,6 +121,9 @@ def load_settings(config_dir: Path) -> AppSettings:
     app_data["live_enabled"] = _parse_bool_env(
         "TRADER_SHAWN_LIVE_ENABLED", app_data.get("live_enabled")
     )
+    market_data_type_env = os.getenv("TRADER_SHAWN_MARKET_DATA_TYPE")
+    if market_data_type_env is not None:
+        app_data["market_data_type"] = market_data_type_env
 
     raw_ibkr_data = app_data.get("ibkr")
     ibkr_data: Any = (

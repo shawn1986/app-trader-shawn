@@ -25,6 +25,7 @@ class IbkrMarketDataClient:
         ibkr_module: Any | None = None,
         ib_api: Any | None = None,
         client_factory: Any | None = None,
+        market_data_type: str = "live",
     ) -> None:
         self._host = host
         self._port = port
@@ -32,18 +33,33 @@ class IbkrMarketDataClient:
         self._client = client if client is not None else ib
         self._ibkr_module = ibkr_module if ibkr_module is not None else ib_api
         self._client_factory = client_factory
+        self._market_data_type = market_data_type
+
+    @property
+    def market_data_type(self) -> str:
+        return self._market_data_type
 
     def ensure_connected(self) -> Any:
         client = self._resolve_client()
         is_connected = getattr(client, "isConnected", None)
         if callable(is_connected) and is_connected():
+            self._request_market_data_type(client)
             return client
 
         connect = getattr(client, "connect", None)
         if not callable(connect):
             raise RuntimeError("IBKR client does not support connect()")
         connect(self._host, self._port, clientId=self._client_id)
+        self._request_market_data_type(client)
         return client
+
+    def disconnect(self) -> None:
+        client = self._client
+        if client is None:
+            return
+        disconnect = getattr(client, "disconnect", None)
+        if callable(disconnect):
+            disconnect()
 
     def fetch_underlying_spot(
         self,
@@ -82,14 +98,44 @@ class IbkrMarketDataClient:
         as_of: date | None = None,
         exchange: str = "SMART",
         currency: str = "USD",
+        strike_window_pct: float = 0.15,
+        fallback_strike_count: int | None = None,
+        max_expiries: int | None = None,
     ) -> list[OptionQuote]:
+        fallback_strike_count = (
+            4
+            if fallback_strike_count is None and self._market_data_type == "delayed"
+            else (24 if fallback_strike_count is None else fallback_strike_count)
+        )
+        max_expiries = (
+            1
+            if max_expiries is None and self._market_data_type == "delayed"
+            else (2 if max_expiries is None else max_expiries)
+        )
         if min_dte < 0 or max_dte < min_dte:
             raise ValueError("invalid DTE bounds")
+        if strike_window_pct <= 0:
+            raise ValueError("strike_window_pct must be positive")
+        if fallback_strike_count <= 0:
+            raise ValueError("fallback_strike_count must be positive")
+        if max_expiries <= 0:
+            raise ValueError("max_expiries must be positive")
 
         client = self.ensure_connected()
         ibkr = self._resolve_ibkr_module()
         stock = ibkr.Stock(symbol=ticker, exchange=exchange, currency=currency)
         qualified_stock = list(client.qualifyContracts(stock))[0]
+        underlying_spot = None
+        if self._market_data_type != "delayed":
+            underlying_spot = _historical_close_price(
+                self._fetch_underlying_history(client, qualified_stock)
+            )
+        if underlying_spot is None and self._market_data_type != "delayed":
+            underlying_snapshot = client.reqTickers(qualified_stock)[0]
+            try:
+                underlying_spot = _ticker_market_price(underlying_snapshot)
+            except RuntimeError:
+                underlying_spot = None
         option_chain = _select_option_chain(
             client.reqSecDefOptParams(
                 ticker,
@@ -100,24 +146,35 @@ class IbkrMarketDataClient:
             exchange=exchange,
         )
         normalized_rights = _normalize_rights(rights)
-        option_contracts = [
-            ibkr.Option(
-                symbol=ticker,
-                lastTradeDateOrContractMonth=_ibkr_expiry(expiry),
-                strike=float(strike),
-                right=right,
-                exchange=exchange,
-                currency=currency,
+        if underlying_spot is None:
+            selected_strikes = _scan_strikes_without_spot(
+                option_chain.strikes,
+                fallback_count=fallback_strike_count,
             )
-            for expiry in _bounded_expiries(
+        else:
+            selected_strikes = _scan_strikes_near_spot(
+                option_chain.strikes,
+                spot=underlying_spot,
+                window_pct=strike_window_pct,
+                fallback_count=fallback_strike_count,
+            )
+        bounded_expiries = _bounded_expiries(
                 option_chain.expirations,
                 today=as_of or date.today(),
                 min_dte=min_dte,
                 max_dte=max_dte,
-            )
-            for strike in sorted(float(value) for value in option_chain.strikes)
-            for right in normalized_rights
-        ]
+        )[:max_expiries]
+        option_contracts = self._fetch_valid_option_contracts(
+            client,
+            ibkr,
+            ticker=ticker,
+            expiries=bounded_expiries,
+            strikes=selected_strikes,
+            rights=normalized_rights,
+            exchange=exchange,
+            currency=currency,
+            option_chain=option_chain,
+        )
         if not option_contracts:
             return []
 
@@ -299,6 +356,13 @@ class IbkrMarketDataClient:
             self._ibkr_module = import_module("ib_insync")
         return self._ibkr_module
 
+    def _request_market_data_type(self, client: Any) -> None:
+        req_market_data_type = getattr(client, "reqMarketDataType", None)
+        if not callable(req_market_data_type):
+            return
+        if self._market_data_type == "delayed":
+            req_market_data_type(3)
+
     def _fetch_contract_quote_rows(
         self,
         *,
@@ -309,6 +373,98 @@ class IbkrMarketDataClient:
         qualified_contracts = list(client.qualifyContracts(*list(contracts)))
         snapshots = list(client.reqTickers(*qualified_contracts))
         return [_ticker_to_quote_row(snapshot) for snapshot in snapshots]
+
+    def _fetch_underlying_history(self, client: Any, qualified_stock: Any) -> list[Any]:
+        req_historical_data = getattr(client, "reqHistoricalData", None)
+        if not callable(req_historical_data):
+            return []
+        try:
+            return list(
+                req_historical_data(
+                    qualified_stock,
+                    endDateTime="",
+                    durationStr="2 D",
+                    barSizeSetting="1 day",
+                    whatToShow="TRADES",
+                    useRTH=True,
+                    formatDate=1,
+                )
+            )
+        except Exception:
+            return []
+
+    def _fetch_valid_option_contracts(
+        self,
+        client: Any,
+        ibkr: Any,
+        *,
+        ticker: str,
+        expiries: Iterable[str],
+        strikes: Iterable[float],
+        rights: Iterable[str],
+        exchange: str,
+        currency: str,
+        option_chain: Any,
+    ) -> list[Any]:
+        selected_strikes = {float(strike) for strike in strikes}
+        selected_rights = {str(right).upper() for right in rights}
+        expiries_list = list(expiries)
+        if not expiries_list or not selected_strikes or not selected_rights:
+            return []
+
+        req_contract_details = getattr(client, "reqContractDetails", None)
+        if callable(req_contract_details):
+            contracts_by_key: dict[tuple[str, float, str], Any] = {}
+            for expiry in expiries_list:
+                template = ibkr.Option(
+                    symbol=ticker,
+                    lastTradeDateOrContractMonth=_ibkr_expiry(expiry),
+                    strike=0.0,
+                    right="",
+                    exchange=exchange,
+                    currency=currency,
+                    tradingClass=str(getattr(option_chain, "tradingClass", "")),
+                    multiplier=str(getattr(option_chain, "multiplier", "")),
+                )
+                try:
+                    contract_details = list(req_contract_details(template))
+                except Exception:
+                    contract_details = []
+                for detail in contract_details:
+                    contract = getattr(detail, "contract", detail)
+                    contract_expiry = _normalize_expiry(
+                        str(getattr(contract, "lastTradeDateOrContractMonth", ""))
+                    )
+                    contract_strike = _optional_float(getattr(contract, "strike", None))
+                    contract_right = str(getattr(contract, "right", "")).upper()
+                    if (
+                        contract_expiry == _normalize_expiry(expiry)
+                        and contract_strike in selected_strikes
+                        and contract_right in selected_rights
+                    ):
+                        contracts_by_key[
+                            (contract_expiry, contract_strike, contract_right)
+                        ] = contract
+            return [
+                contracts_by_key[key]
+                for key in sorted(contracts_by_key, key=lambda item: (item[0], item[1], item[2]))
+            ]
+
+        return [
+            ibkr.Option(
+                symbol=ticker,
+                lastTradeDateOrContractMonth=_ibkr_expiry(expiry),
+                strike=float(strike),
+                right=right,
+                exchange=exchange,
+                currency=currency,
+                tradingClass=str(getattr(option_chain, "tradingClass", "")),
+                multiplier=str(getattr(option_chain, "multiplier", "")),
+            )
+            for expiry in expiries_list
+            for strike in selected_strikes
+            for right in selected_rights
+        ]
 
 
 def _bounded_expiries(
@@ -345,6 +501,55 @@ def _normalize_rights(rights: Iterable[str]) -> list[str]:
         if value not in normalized:
             normalized.append(value)
     return normalized
+
+
+def _scan_strikes_near_spot(
+    strikes: Iterable[object],
+    *,
+    spot: float,
+    window_pct: float,
+    fallback_count: int,
+) -> list[float]:
+    normalized = sorted(float(value) for value in strikes)
+    if not normalized:
+        return []
+
+    lower_bound = spot * (1 - window_pct)
+    upper_bound = spot * (1 + window_pct)
+    bounded = [
+        strike
+        for strike in normalized
+        if lower_bound <= strike <= upper_bound
+    ]
+    if bounded:
+        return sorted(
+            sorted(bounded, key=lambda strike: abs(strike - spot))[:fallback_count]
+        )
+
+    return sorted(
+        sorted(normalized, key=lambda strike: abs(strike - spot))[:fallback_count]
+    )
+
+
+def _scan_strikes_without_spot(
+    strikes: Iterable[object],
+    *,
+    fallback_count: int,
+) -> list[float]:
+    normalized = sorted(float(value) for value in strikes)
+    if len(normalized) <= fallback_count:
+        return normalized
+
+    start = max((len(normalized) - fallback_count) // 2, 0)
+    return normalized[start:start + fallback_count]
+
+
+def _historical_close_price(bars: Iterable[Any]) -> float | None:
+    for bar in reversed(list(bars)):
+        close = _optional_float(getattr(bar, "close", None))
+        if close is not None:
+            return close
+    return None
 
 
 def _select_option_chain(chains: Iterable[Any], *, exchange: str) -> Any:

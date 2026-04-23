@@ -97,6 +97,7 @@ C:\Users\Shawn\.venvs\trader-shawn\Scripts\python.exe -m trader_shawn.app --help
 ```yaml
 mode: paper
 live_enabled: false
+market_data_type: delayed
 ibkr:
   host: 127.0.0.1
   port: 4002
@@ -108,6 +109,7 @@ audit_db_path: runtime/audit.db
 
 - `mode`: `paper` 或 `live`
 - `live_enabled`: live mode 的第二道保險，`mode: live` 時必須是 `true`
+- `market_data_type`: `paper` 可用 `delayed` 降低 IBKR 10197 即時行情 session 衝突；`live` mode 只能使用 `live`
 - `ibkr.host`: 通常是 `127.0.0.1`
 - `ibkr.port`: 需符合 TWS/IB Gateway 的 API socket port
 - `ibkr.client_id`: market data client ID，execution client 會使用 `client_id + 1`
@@ -170,6 +172,7 @@ events: []
 ```powershell
 $env:TRADER_SHAWN_MODE='paper'
 $env:TRADER_SHAWN_LIVE_ENABLED='false'
+$env:TRADER_SHAWN_MARKET_DATA_TYPE='delayed'
 $env:TRADER_SHAWN_IBKR_HOST='127.0.0.1'
 $env:TRADER_SHAWN_IBKR_PORT='4002'
 $env:TRADER_SHAWN_IBKR_CLIENT_ID='7'
@@ -195,6 +198,8 @@ $env:TRADER_SHAWN_IBKR_CLIENT_ID='7'
 - order execution path: `client_id + 1`
 
 如果同時開 War Room 和另外的 CLI 命令，仍可能和相同 client ID 競爭。盤中操作建議以 War Room 為主控台，避免多個程序同時打 IBKR。
+
+`scan`, `decide`, `trade`, `manage`, `trade-cycle` 這類單次 CLI 命令結束時會主動呼叫 IBKR `disconnect()`。War Room 則是長駐服務，會維持自己的連線直到程序停止。
 
 ## CLI 操作
 
@@ -511,6 +516,21 @@ python -m trader_shawn.app dashboard runtime/dashboard.json
 
 先用 `scan` 和 `decide` 分開定位，不要直接跑 `trade`。
 
+### IBKR `Error 10197` 或 underlying spot price 取不到
+
+這通常是 IBKR 即時行情 session 衝突，例如同時開了 TWS、手機、Client Portal 或其他 API session。`paper` mode 預設使用：
+
+```yaml
+market_data_type: delayed
+```
+
+處理順序：
+
+- 先關掉其他會吃即時行情的 session，再重新跑 `scan`
+- paper 測試可維持 `market_data_type: delayed`
+- live mode 不能使用 delayed；設定成 live 時，系統會拒絕 `market_data_type: delayed`
+- 單次 CLI command 跑完會主動斷線；War Room 是長駐服務，需要停止 War Room 程序才會釋放連線
+
 ## 日常建議流程
 
 以下命令假設已經在 repo root 並啟用 venv：
@@ -547,3 +567,9 @@ python -m trader_shawn.app trade
 ```
 
 或在 War Room 中輸入 `ARM` 後使用控制區，`trade` 仍需二次確認。
+
+
+模擬交易用戶名
+kqxnko561
+模擬交易賬戶號碼
+DUK088172

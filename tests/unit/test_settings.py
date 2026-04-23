@@ -47,6 +47,7 @@ def test_load_settings_merges_yaml_and_env(monkeypatch, tmp_path: Path) -> None:
 
     monkeypatch.setenv("TRADER_SHAWN_MODE", "live")
     monkeypatch.setenv("TRADER_SHAWN_LIVE_ENABLED", "true")
+    monkeypatch.setenv("TRADER_SHAWN_MARKET_DATA_TYPE", "live")
     monkeypatch.setenv("TRADER_SHAWN_IBKR_HOST", "10.0.0.8")
     monkeypatch.setenv("TRADER_SHAWN_IBKR_PORT", "4002")
     monkeypatch.setenv("TRADER_SHAWN_IBKR_CLIENT_ID", "19")
@@ -55,6 +56,7 @@ def test_load_settings_merges_yaml_and_env(monkeypatch, tmp_path: Path) -> None:
 
     assert settings.mode == "live"
     assert settings.live_enabled is True
+    assert settings.market_data_type == "live"
     assert settings.ibkr.host == "10.0.0.8"
     assert settings.ibkr.port == 4002
     assert settings.ibkr.client_id == 19
@@ -76,6 +78,32 @@ def test_load_settings_uses_ib_gateway_paper_default_port(tmp_path: Path) -> Non
     assert settings.ibkr.host == "127.0.0.1"
     assert settings.ibkr.port == 4002
     assert settings.ibkr.client_id == 7
+    assert settings.market_data_type == "live"
+
+
+def test_load_settings_accepts_delayed_market_data_for_paper_mode(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    write_config(
+        config_dir,
+        app="mode: paper\nlive_enabled: false\nmarket_data_type: delayed\nibkr:\n  host: 127.0.0.1\n  port: 4002\n  client_id: 7\naudit_db_path: runtime/audit.db\n",
+    )
+
+    settings = load_settings(config_dir)
+
+    assert settings.market_data_type == "delayed"
+
+
+def test_load_settings_rejects_delayed_market_data_for_live_mode(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    write_config(
+        config_dir,
+        app="mode: live\nlive_enabled: true\nmarket_data_type: delayed\nibkr:\n  host: 127.0.0.1\n  port: 4002\n  client_id: 7\naudit_db_path: runtime/audit.db\n",
+    )
+
+    with pytest.raises(ValidationError, match="live_mode_requires_live_market_data"):
+        load_settings(config_dir)
 
 
 def test_load_settings_rejects_invalid_boolean_env(monkeypatch, tmp_path: Path) -> None:
