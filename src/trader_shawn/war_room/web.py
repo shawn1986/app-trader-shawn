@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -46,6 +47,14 @@ def create_war_room_app(
         provider = snapshot_provider or _lazy_default_snapshot_provider()
         runner = command_runner or run_runtime_command
     armed_sessions = ArmedSessionStore()
+
+    @app.get("/")
+    def root_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/war-room")
+
+    @app.get("/favicon.ico")
+    def favicon() -> Response:
+        return Response(status_code=204)
 
     @app.get("/war-room")
     def war_room_shell(request: Request):

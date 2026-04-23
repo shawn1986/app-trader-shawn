@@ -31,6 +31,24 @@ def test_snapshot_endpoint_returns_war_room_payload() -> None:
     assert response.json()["risk_deck"]["open_risk"] == 1200.0
 
 
+def test_root_redirects_to_war_room_shell() -> None:
+    client = TestClient(create_war_room_app(snapshot_provider=lambda: {}))
+
+    response = client.get("/", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/war-room"
+
+
+def test_favicon_returns_no_content() -> None:
+    client = TestClient(create_war_room_app(snapshot_provider=lambda: {}))
+
+    response = client.get("/favicon.ico")
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+
 def test_arm_endpoint_rejects_invalid_phrase() -> None:
     app = create_war_room_app(snapshot_provider=lambda: {})
     client = TestClient(app)
