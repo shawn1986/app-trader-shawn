@@ -7,3 +7,5 @@ runtime/
 dist/
 build/
 *.egg-info/
+*.log
+.superpowers/
