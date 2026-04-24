@@ -143,6 +143,39 @@ body[data-busy="true"] {
     color: var(--warn);
 }
 
+.next-actions {
+    margin-top: 1rem;
+    border-left: 2px solid rgba(99, 209, 255, 0.66);
+    padding: 0.15rem 0 0.15rem 0.8rem;
+    display: grid;
+    gap: 0.42rem;
+}
+
+.next-actions[hidden] {
+    display: none;
+}
+
+.next-actions h3 {
+    margin: 0;
+    font-size: 0.82rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.next-actions p {
+    color: rgba(215, 230, 245, 0.82);
+}
+
+.next-actions ul {
+    margin: 0;
+    padding-left: 1.05rem;
+    display: grid;
+    gap: 0.25rem;
+    color: rgba(215, 230, 245, 0.78);
+    font-size: 0.9rem;
+    line-height: 1.35;
+}
+
 .mission-heading {
     margin-top: 1.2rem;
 }

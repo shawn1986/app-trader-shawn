@@ -178,17 +178,8 @@ def test_war_room_unlocks_controls_and_refreshes_threat_level(live_server) -> No
         page.wait_for_function(
             "() => document.querySelector('[data-threat-level]')?.textContent.trim() === 'Critical'"
         )
-
-        page.click('[data-command="trade"]')
-        page.wait_for_selector("[data-trade-confirm]:not([hidden])")
-        page.click("[data-trade-confirm-submit]")
+        page.wait_for_selector('[data-command="trade"][disabled]')
         page.wait_for_selector("[data-trade-confirm][hidden]")
-        page.wait_for_function(
-            "() => document.querySelector('[data-mission-log] li')?.textContent.includes('TRADE ok')"
-        )
-        page.wait_for_function(
-            "() => document.querySelector('[data-threat-level]')?.textContent.trim() === 'Nominal'"
-        )
 
         browser.close()
 
@@ -204,13 +195,12 @@ def test_war_room_relocks_after_armed_session_expires(live_server) -> None:
 
         page.fill("[data-arm-input]", "ARM")
         page.click("[data-arm-submit]")
-        page.wait_for_selector('[data-command="trade"]:not([disabled])')
+        page.wait_for_selector('[data-command="manage"]:not([disabled])')
+        page.wait_for_selector('[data-command="trade"][disabled]')
 
         page.context.clear_cookies()
 
-        page.click('[data-command="trade"]')
-        page.wait_for_selector("[data-trade-confirm]:not([hidden])")
-        page.click("[data-trade-confirm-submit]")
+        page.click('[data-command="manage"]')
 
         page.wait_for_function("() => document.body.dataset.mode === 'monitoring'")
         page.wait_for_selector('[data-command="manage"][disabled]')
@@ -427,15 +417,28 @@ def test_war_room_surfaces_successful_scan_counts_after_overlay_closes() -> None
             page.goto(f"{base_url}/war-room")
             page.fill("[data-arm-input]", "ARM")
             page.click("[data-arm-submit]")
-            page.wait_for_selector('[data-command="trade"]:not([disabled])')
-            page.click('[data-command="trade"]')
-            page.wait_for_selector("[data-trade-confirm]:not([hidden])")
+            page.wait_for_selector('[data-command="scan"]:not([disabled])')
+            page.wait_for_selector('[data-command="trade"][disabled]')
 
             page.click('[data-command="scan"]')
             page.wait_for_function(
                 "() => document.querySelector('[data-command-overlay]')?.hidden === true"
             )
             page.wait_for_selector("[data-trade-confirm][hidden]")
+            page.wait_for_selector('[data-command="trade"][disabled]')
+            page.wait_for_selector("[data-next-actions]:not([hidden])")
+            page.wait_for_function(
+                "() => document.querySelector('[data-next-actions]')?.textContent.includes('No tradable candidates')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-next-actions]')?.textContent.includes('Review watchlist observations')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-next-actions]')?.textContent.includes('Relax filters or widen scan inputs')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-next-actions]')?.textContent.includes('Run Scan again')"
+            )
             page.wait_for_function(
                 "() => document.querySelector('[data-mission-log] li')?.dataset.severity === 'ok'"
             )
@@ -448,6 +451,84 @@ def test_war_room_surfaces_successful_scan_counts_after_overlay_closes() -> None
             page.wait_for_function(
                 "() => document.querySelector('[data-mission-log] li')?.textContent.includes('AMD 8 quotes')"
             )
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def test_war_room_enables_trade_only_after_approved_decision() -> None:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    host, port = sock.getsockname()
+    sock.close()
+
+    def snapshot_provider() -> dict[str, object]:
+        return {
+            "generated_at": "2026-04-21T01:02:00+00:00",
+            "threat_level": "nominal",
+            "command_status": {"broker": {"state": "ok"}},
+            "risk_deck": {"open_risk": 1200.0},
+            "hot_positions": [],
+            "mission_log": [],
+            "threat_rail": {"level": "nominal"},
+        }
+
+    def command_runner(command: str, payload=None, *, progress_callback=None) -> dict[str, object]:
+        _ = payload
+        _ = progress_callback
+        assert command == "decide"
+        return {
+            "status": "ok",
+            "command": "decide",
+            "candidate_count": 1,
+            "candidates": [{"ticker": "AMD"}],
+            "decision": {"action": "approve", "ticker": "AMD", "limit_credit": 1.25},
+        }
+
+    app = create_war_room_app(snapshot_provider=snapshot_provider, command_runner=command_runner)
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://{host}:{port}"
+
+    ready = False
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(f"{base_url}/war-room", timeout=0.2) as response:
+                if response.status == 200:
+                    ready = True
+                    break
+        except URLError:
+            time.sleep(0.05)
+
+    if not ready:
+        server.should_exit = True
+        thread.join(timeout=5)
+        pytest.fail("live_server did not become ready within 5 seconds")
+
+    try:
+        with sync_playwright() as p:
+            browser = _launch_chromium_or_skip(p)
+            page = browser.new_page()
+            page.goto(f"{base_url}/war-room")
+            page.fill("[data-arm-input]", "ARM")
+            page.click("[data-arm-submit]")
+            page.wait_for_selector('[data-command="trade"][disabled]')
+
+            page.click('[data-command="decide"]')
+            page.wait_for_function(
+                "() => document.querySelector('[data-command-overlay]')?.hidden === true"
+            )
+            page.wait_for_selector('[data-command="trade"]:not([disabled])')
+            page.wait_for_selector("[data-next-actions]:not([hidden])")
+            page.wait_for_function(
+                "() => document.querySelector('[data-next-actions]')?.textContent.includes('Trade ready')"
+            )
+
+            page.click('[data-command="trade"]')
+            page.wait_for_selector("[data-trade-confirm]:not([hidden])")
             browser.close()
     finally:
         server.should_exit = True

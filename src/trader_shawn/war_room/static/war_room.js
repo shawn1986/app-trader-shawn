@@ -5,6 +5,7 @@ let pendingTrade = null;
 let busyCommand = null;
 let isArmed = false;
 let activeCommandJobId = null;
+let tradeReady = false;
 
 const COMMAND_COPY_DEFAULT = "Core systems online. Monitoring live operations.";
 const THREAT_COPY_DEFAULT = "Type ARM to unlock";
@@ -31,8 +32,12 @@ function commandDetail(value) {
 }
 
 function syncCommandAvailability() {
-    const commandDisabled = !isArmed || busyCommand !== null;
     document.querySelectorAll("[data-command]").forEach((button) => {
+        const commandName = button.dataset.command || "";
+        let commandDisabled = !isArmed || busyCommand !== null;
+        if (commandName === "trade" && !tradeReady) {
+            commandDisabled = true;
+        }
         button.disabled = commandDisabled;
         button.dataset.busy = busyCommand === button.dataset.command ? "true" : "false";
     });
@@ -80,6 +85,13 @@ function firstSymbolError(result) {
     return errors.length > 0 ? errors[0] : null;
 }
 
+function scanCounts(result) {
+    return {
+        candidates: Number(result?.candidate_count || 0),
+        watchlist: Number(result?.watchlist_count || 0),
+    };
+}
+
 function summarizeScanResult(result) {
     if (String(result?.command || "").toLowerCase() !== "scan") {
         return "";
@@ -88,9 +100,10 @@ function summarizeScanResult(result) {
         return "";
     }
 
-    const parts = [`${result.candidate_count} candidates`];
+    const counts = scanCounts(result);
+    const parts = [`${counts.candidates} candidates`];
     if (typeof result?.watchlist_count === "number") {
-        parts.push(`${result.watchlist_count} watchlist`);
+        parts.push(`${counts.watchlist} watchlist`);
     }
 
     const summaries = Array.isArray(result?.symbol_summaries) ? result.symbol_summaries : [];
@@ -99,7 +112,10 @@ function summarizeScanResult(result) {
         .slice(0, 3)
         .map((summary) => `${summary.symbol || "symbol"} ${summary.quotes_count} quotes`);
 
-    let detail = `${parts.join(", ")}.`;
+    let detail =
+        counts.candidates === 0
+            ? `No tradable candidates (${parts.join(", ")}).`
+            : `${parts.join(", ")}.`;
     if (quoteSummaries.length > 0) {
         detail = `${detail} ${quoteSummaries.join("; ")}.`;
     }
@@ -107,6 +123,117 @@ function summarizeScanResult(result) {
         detail = `${detail} +${summaries.length - quoteSummaries.length} symbols.`;
     }
     return detail;
+}
+
+function isApprovedDecision(result) {
+    if (String(result?.command || "").toLowerCase() !== "decide") {
+        return false;
+    }
+    const action = String(result?.decision?.action || "").toLowerCase();
+    return result?.status === "ok" && action === "approve";
+}
+
+function nextActionModel(result) {
+    const command = String(result?.command || "").toLowerCase();
+    if (command === "scan" && result?.status === "ok") {
+        const counts = scanCounts(result);
+        if (counts.candidates === 0) {
+            return {
+                title: "No tradable candidates",
+                summary: `${counts.watchlist} watchlist observations need better pricing, liquidity, or filter settings before a decision.`,
+                actions: [
+                    "Review watchlist observations for symbols that almost qualified.",
+                    "Relax filters or widen scan inputs if the strategy is too strict.",
+                    "Run Scan again after quotes refresh or market conditions move.",
+                ],
+            };
+        }
+        return {
+            title: "Candidates ready",
+            summary: `${counts.candidates} candidates are ready for decision review.`,
+            actions: [
+                "Run Decide to choose the candidate and verify risk.",
+                "Keep Trade locked until Decide returns an approved action.",
+            ],
+        };
+    }
+    if (command === "decide" && result?.status === "no_candidates") {
+        return {
+            title: "Decision blocked",
+            summary: "No candidates are available for the decision stack.",
+            actions: [
+                "Run Scan again after quotes refresh.",
+                "Relax filters or widen scan inputs if watchlist observations look acceptable.",
+            ],
+        };
+    }
+    if (isApprovedDecision(result)) {
+        return {
+            title: "Trade ready",
+            summary: "Decision approved. Trade can now be staged for confirmation.",
+            actions: [
+                "Review the approved candidate and limit credit.",
+                "Use Trade only if the order still matches the current market.",
+            ],
+        };
+    }
+    return null;
+}
+
+function renderNextActions(result) {
+    const root = document.querySelector("[data-next-actions]");
+    if (!root) {
+        return;
+    }
+    const title = root.querySelector("[data-next-title]");
+    const summary = root.querySelector("[data-next-summary]");
+    const list = root.querySelector("[data-next-list]");
+    const model = nextActionModel(result);
+
+    if (!model) {
+        root.hidden = true;
+        if (list) {
+            list.replaceChildren();
+        }
+        return;
+    }
+
+    if (title) {
+        title.textContent = model.title;
+    }
+    if (summary) {
+        summary.textContent = model.summary;
+    }
+    if (list) {
+        list.replaceChildren();
+        model.actions.forEach((action) => {
+            const item = document.createElement("li");
+            item.textContent = action;
+            list.appendChild(item);
+        });
+    }
+    root.hidden = false;
+}
+
+function applyCommandOutcome(result) {
+    const command = String(result?.command || "").toLowerCase();
+    if (command === "scan" || command === "manage") {
+        pendingTrade = null;
+        tradeReady = false;
+        hideTradeConfirm();
+    }
+    if (command === "decide") {
+        pendingTrade = null;
+        tradeReady = isApprovedDecision(result);
+        hideTradeConfirm();
+    }
+    if (command === "trade") {
+        pendingTrade = null;
+        tradeReady = false;
+        hideTradeConfirm();
+    }
+    renderNextActions(result);
+    syncCommandAvailability();
 }
 
 function resultHeadline(result) {
@@ -189,6 +316,7 @@ function prependMissionResult(result) {
         item.appendChild(detailEl);
     }
     missionLog.prepend(item);
+    applyCommandOutcome(result);
     renderPersistentResultSummary(result);
 }
 
@@ -236,6 +364,7 @@ function showCommandOverlay(commandName) {
     if (overlay) {
         overlay.hidden = false;
     }
+    renderNextActions(null);
     renderOverlayEvents([]);
     setOverlayProgress(null, null, null);
     syncCommandAvailability();
@@ -270,7 +399,9 @@ function hideCommandOverlay() {
 function relockWarRoom() {
     setArmedMode(false);
     pendingTrade = null;
+    tradeReady = false;
     hideTradeConfirm();
+    renderNextActions(null);
     hideCommandOverlay();
 }
 
@@ -496,12 +627,21 @@ async function armWarRoom() {
 
 async function runCommand(commandName) {
     if (commandName === "trade") {
+        if (!tradeReady) {
+            prependMissionResult({
+                command: "trade",
+                status: "blocked",
+                reason: "Run Decide and wait for an approved candidate before staging a trade.",
+            });
+            return;
+        }
         pendingTrade = {command: "trade"};
         showTradeConfirm();
         return;
     }
 
     pendingTrade = null;
+    tradeReady = false;
     hideTradeConfirm();
     showCommandOverlay(commandName);
     let result = null;
