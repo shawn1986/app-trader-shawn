@@ -132,6 +132,7 @@ def test_war_room_shell_renders_alpha_layout_copy() -> None:
     assert "Threat Rail" in html
     assert "Type ARM to unlock" in html
     assert "data-primary-command" in html
+    assert "data-arm-submit" not in html
     assert 'data-command="scan"' not in html
     assert 'data-command="decide"' not in html
     assert 'data-command="trade"' not in html
@@ -206,7 +207,7 @@ def test_war_room_unlocks_controls_and_refreshes_threat_level(live_server) -> No
         )
 
         page.fill("[data-arm-input]", "ARM")
-        page.click("[data-arm-submit]")
+        page.click("[data-primary-command]")
         page.wait_for_selector('[data-secondary-command="manage"]:not([disabled])')
 
         page.click('[data-secondary-command="manage"]')
@@ -233,7 +234,7 @@ def test_war_room_relocks_after_armed_session_expires(live_server) -> None:
         )
 
         page.fill("[data-arm-input]", "ARM")
-        page.click("[data-arm-submit]")
+        page.click("[data-primary-command]")
         page.wait_for_selector('[data-secondary-command="manage"]:not([disabled])')
         page.wait_for_selector('[data-primary-command]:not([disabled])')
 
@@ -259,7 +260,7 @@ def test_war_room_shows_full_overlay_while_command_is_running(live_server) -> No
         page = browser.new_page()
         page.goto(f"{live_server}/war-room")
         page.fill("[data-arm-input]", "ARM")
-        page.click("[data-arm-submit]")
+        page.click("[data-primary-command]")
         page.wait_for_selector('[data-primary-command]:not([disabled])')
 
         page.click('[data-primary-command]')
@@ -364,7 +365,7 @@ def test_war_room_surfaces_scan_symbol_errors_after_overlay_closes() -> None:
             page = browser.new_page()
             page.goto(f"{base_url}/war-room")
             page.fill("[data-arm-input]", "ARM")
-            page.click("[data-arm-submit]")
+            page.click("[data-primary-command]")
             page.wait_for_selector('[data-primary-command]:not([disabled])')
 
             page.click('[data-primary-command]')
@@ -457,7 +458,7 @@ def test_war_room_surfaces_successful_scan_counts_after_overlay_closes() -> None
             page = browser.new_page()
             page.goto(f"{base_url}/war-room")
             page.fill("[data-arm-input]", "ARM")
-            page.click("[data-arm-submit]")
+            page.click("[data-primary-command]")
             page.wait_for_selector('[data-primary-command]:not([disabled])')
             page.wait_for_function(
                 "() => document.querySelector('[data-primary-command]')?.textContent.includes('Run Scan')"
@@ -568,7 +569,7 @@ def test_war_room_enables_trade_only_after_approved_decision() -> None:
             page = browser.new_page()
             page.goto(f"{base_url}/war-room")
             page.fill("[data-arm-input]", "ARM")
-            page.click("[data-arm-submit]")
+            page.click("[data-primary-command]")
             page.wait_for_selector('[data-primary-command]:not([disabled])')
             page.wait_for_function(
                 "() => document.querySelector('[data-primary-command]')?.textContent.includes('Run Scan')"
@@ -695,7 +696,7 @@ def test_war_room_shows_candidate_preview_after_scan_finds_candidates() -> None:
             page = browser.new_page()
             page.goto(f"{base_url}/war-room")
             page.fill("[data-arm-input]", "ARM")
-            page.click("[data-arm-submit]")
+            page.click("[data-primary-command]")
             page.wait_for_selector('[data-primary-command]:not([disabled])')
 
             page.click('[data-primary-command]')
@@ -794,7 +795,7 @@ def test_war_room_surfaces_decide_provider_failure_detail() -> None:
             page = browser.new_page()
             page.goto(f"{base_url}/war-room")
             page.fill("[data-arm-input]", "ARM")
-            page.click("[data-arm-submit]")
+            page.click("[data-primary-command]")
             page.wait_for_selector('[data-primary-command]:not([disabled])')
 
             page.click('[data-primary-command]')
@@ -902,7 +903,7 @@ def test_war_room_surfaces_decide_rejection_reason() -> None:
             page = browser.new_page()
             page.goto(f"{base_url}/war-room")
             page.fill("[data-arm-input]", "ARM")
-            page.click("[data-arm-submit]")
+            page.click("[data-primary-command]")
             page.wait_for_selector('[data-primary-command]:not([disabled])')
 
             page.click('[data-primary-command]')
@@ -1007,17 +1008,13 @@ def test_war_room_attaches_overlay_to_existing_running_command_after_conflict() 
             first_page = context.new_page()
             first_page.goto(f"{base_url}/war-room")
             first_page.fill("[data-arm-input]", "ARM")
-            first_page.click("[data-arm-submit]")
+            first_page.click("[data-primary-command]")
             first_page.wait_for_selector('[data-primary-command]:not([disabled])')
             first_page.click('[data-primary-command]')
             assert scan_entered.wait(timeout=3.0)
 
             second_page = context.new_page()
             second_page.goto(f"{base_url}/war-room")
-            second_page.fill("[data-arm-input]", "ARM")
-            second_page.click("[data-arm-submit]")
-            second_page.wait_for_selector('[data-primary-command]:not([disabled])')
-            second_page.click('[data-primary-command]')
 
             second_page.wait_for_selector("[data-command-overlay]:not([hidden])")
             second_page.wait_for_function(

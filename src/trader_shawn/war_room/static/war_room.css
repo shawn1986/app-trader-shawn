@@ -92,7 +92,6 @@ body[data-busy="true"] {
     padding: 0.52rem 0.6rem;
 }
 
-.arm-row button,
 .workflow-cta button,
 .secondary-actions button,
 .trade-confirm button {
@@ -109,7 +108,6 @@ body[data-busy="true"] {
         opacity 140ms ease;
 }
 
-.arm-row button:hover,
 .workflow-cta button:hover,
 .secondary-actions button:hover,
 .trade-confirm button:hover {

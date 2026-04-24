@@ -64,12 +64,8 @@ function syncCommandAvailability() {
     });
 
     const armInput = document.querySelector("[data-arm-input]");
-    const armSubmit = document.querySelector("[data-arm-submit]");
     if (armInput) {
         armInput.disabled = busyCommand !== null;
-    }
-    if (armSubmit) {
-        armSubmit.disabled = busyCommand !== null;
     }
 
     const tradeConfirm = document.querySelector("[data-trade-confirm-submit]");
@@ -912,13 +908,7 @@ async function confirmTrade() {
 document.addEventListener("DOMContentLoaded", () => {
     setArmedMode(false);
 
-    const armSubmit = document.querySelector("[data-arm-submit]");
     const armInput = document.querySelector("[data-arm-input]");
-    if (armSubmit) {
-        armSubmit.addEventListener("click", () => {
-            armWarRoom().catch(() => prependMissionResult({command: "arm", status: "failed"}));
-        });
-    }
     if (armInput) {
         armInput.addEventListener("keydown", (event) => {
             if (event.key === "Enter") {
