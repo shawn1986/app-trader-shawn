@@ -99,6 +99,19 @@ class CandidateSpread:
 
 
 @dataclass(slots=True)
+class PaperWatchlistEntry:
+    ticker: str
+    strategy: str
+    expiry: str
+    dte: int
+    short_strike: float
+    long_strike: float
+    width: float
+    short_delta: float | None = None
+    flags: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class DecisionRecord:
     cycle_id: str
     provider: str

@@ -91,6 +91,19 @@ class FakeScanner:
         return list(self.candidates)
 
 
+class FakeMarketScanner(FakeScanner):
+    def __init__(self, candidates: list[CandidateSpread], watchlist: list[object]) -> None:
+        super().__init__(candidates)
+        self.watchlist = list(watchlist)
+
+    def scan_market(self, symbols: list[str]) -> object:
+        self.calls.append(list(symbols))
+        return SimpleNamespace(
+            candidates=list(self.candidates),
+            watchlist=list(self.watchlist),
+        )
+
+
 class FakeDecisionService:
     def __init__(self, *, decision: object) -> None:
         self.decision = decision
@@ -372,6 +385,86 @@ def test_scan_command_executes_runtime_scan_and_returns_candidates(monkeypatch) 
     assert payload["candidate_count"] == 2
     assert payload["candidates"][0]["ticker"] == "AMD"
     assert payload["candidates"][1]["ticker"] == "NVDA"
+    assert scanner.calls == [["SPY", "QQQ", "AMD"]]
+
+
+def test_scan_command_includes_watchlist_for_paper_market_observations(monkeypatch) -> None:
+    runner = CliRunner()
+    scanner = FakeMarketScanner(
+        [],
+        [
+            SimpleNamespace(
+                ticker="AMD",
+                strategy="bull_put_credit_spread",
+                expiry="2026-05-01",
+                dte=7,
+                short_strike=160.0,
+                long_strike=155.0,
+                width=5.0,
+                short_delta=None,
+                flags=["missing_delta", "missing_market_prices"],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(scanner=scanner),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["scan"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+
+    assert payload["status"] == "ok"
+    assert payload["candidate_count"] == 0
+    assert payload["candidates"] == []
+    assert payload["watchlist_count"] == 1
+    assert payload["watchlist"] == [
+        {
+            "ticker": "AMD",
+            "strategy": "bull_put_credit_spread",
+            "expiry": "2026-05-01",
+            "dte": 7,
+            "short_strike": 160.0,
+            "long_strike": 155.0,
+            "width": 5.0,
+            "short_delta": None,
+            "flags": ["missing_delta", "missing_market_prices"],
+        }
+    ]
+    assert scanner.calls == [["SPY", "QQQ", "AMD"]]
+
+
+def test_scan_command_preserves_legacy_scan_market_list_results(monkeypatch) -> None:
+    runner = CliRunner()
+
+    class LegacyListMarketScanner:
+        def __init__(self, candidates: list[CandidateSpread]) -> None:
+            self.candidates = list(candidates)
+            self.calls: list[list[str]] = []
+
+        def scan_market(self, symbols: list[str]) -> list[CandidateSpread]:
+            self.calls.append(list(symbols))
+            return list(self.candidates)
+
+    scanner = LegacyListMarketScanner([_spread(), _spread(ticker="NVDA", short_strike=110, long_strike=105)])
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(scanner=scanner),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["scan"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "ok"
+    assert payload["candidate_count"] == 2
+    assert [item["ticker"] for item in payload["candidates"]] == ["AMD", "NVDA"]
     assert scanner.calls == [["SPY", "QQQ", "AMD"]]
 
 
@@ -1230,6 +1323,49 @@ def test_trade_command_blocks_when_opening_position_exists_without_event(
 def test_trade_command_returns_no_candidates_without_fetching_account(monkeypatch) -> None:
     runner = CliRunner()
     scanner = FakeScanner([])
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=scanner,
+            account_service=ExplodingAccountService(),
+            position_service=FakePositionService(open_symbol_count=0),
+            risk_guard=FakeRiskGuard(allowed=True),
+            executor=FakeExecutor(),
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["trade"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "command": "trade",
+        "config_dir": str((Path.cwd() / "config").resolve()),
+        "live_enabled": False,
+        "mode": "paper",
+        "status": "no_candidates",
+    }
+
+
+def test_trade_command_does_not_treat_watchlist_as_trade_candidates(monkeypatch) -> None:
+    runner = CliRunner()
+    scanner = FakeMarketScanner(
+        [],
+        [
+            SimpleNamespace(
+                ticker="AMD",
+                strategy="bull_put_credit_spread",
+                expiry="2026-05-01",
+                dte=7,
+                short_strike=160.0,
+                long_strike=155.0,
+                width=5.0,
+                short_delta=None,
+                flags=["missing_delta"],
+            )
+        ],
+    )
     monkeypatch.setattr(
         app_module,
         "build_cli_runtime",

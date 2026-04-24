@@ -1,5 +1,7 @@
 from pathlib import Path
+import asyncio
 import threading
+import time
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -70,6 +72,133 @@ def test_command_endpoint_requires_armed_session() -> None:
 
     assert response.status_code == 403
     assert response.json()["reason"] == "armed_mode_required"
+
+
+def test_command_status_endpoint_defaults_to_idle() -> None:
+    client = TestClient(create_war_room_app(snapshot_provider=lambda: {}))
+
+    response = client.get("/api/war-room/commands/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "idle"
+    assert payload["job_id"] is None
+
+
+def test_async_command_endpoint_reports_progress_and_completion() -> None:
+    def command_runner(command: str, payload=None, *, progress_callback=None) -> dict[str, str]:
+        assert command == "scan"
+        _ = payload
+        if callable(progress_callback):
+            progress_callback(
+                {
+                    "stage": "scan_symbol_fetching",
+                    "message": "Fetching SPY option quotes.",
+                    "symbol": "SPY",
+                    "current": 0,
+                    "total": 2,
+                    "unit": "symbols",
+                }
+            )
+            time.sleep(0.05)
+            progress_callback(
+                {
+                    "stage": "scan_symbol_completed",
+                    "message": "SPY complete. 0 quotes, 0 candidates, 1 watchlist.",
+                    "symbol": "SPY",
+                    "current": 1,
+                    "total": 2,
+                    "unit": "symbols",
+                }
+            )
+            time.sleep(0.05)
+        return {"status": "ok", "command": command}
+
+    app = create_war_room_app(snapshot_provider=lambda: {}, command_runner=command_runner)
+    client = TestClient(app)
+
+    arm = client.post("/api/war-room/arm", json={"phrase": "ARM"})
+    assert arm.status_code == 204
+
+    start = client.post("/api/war-room/commands/scan", json={"async": True})
+
+    assert start.status_code == 202
+    job_id = start.json()["job_id"]
+
+    completed = None
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        status = client.get("/api/war-room/commands/status")
+        assert status.status_code == 200
+        payload = status.json()
+        if payload["job_id"] == job_id and payload["status"] == "completed":
+            completed = payload
+            break
+        time.sleep(0.02)
+
+    assert completed is not None
+    assert completed["command"] == "scan"
+    assert completed["result"]["status"] == "ok"
+    assert completed["progress"]["current"] == 1
+    assert completed["progress"]["total"] == 2
+    assert any(
+        event["message"] == "Fetching SPY option quotes."
+        for event in completed["events"]
+    )
+
+
+def test_async_command_endpoint_rejects_unsupported_command_immediately() -> None:
+    client = TestClient(create_war_room_app(snapshot_provider=lambda: {}))
+
+    arm = client.post("/api/war-room/arm", json={"phrase": "ARM"})
+    assert arm.status_code == 204
+
+    response = client.post("/api/war-room/commands/liquidate", json={"async": True})
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "reason": "unsupported_command",
+        "command": "liquidate",
+    }
+
+
+def test_sync_command_is_blocked_while_async_command_is_running() -> None:
+    release_scan = threading.Event()
+
+    def command_runner(command: str, payload=None, *, progress_callback=None) -> dict[str, str]:
+        _ = payload
+        if command == "scan":
+            if callable(progress_callback):
+                progress_callback(
+                    {
+                        "stage": "scan_symbol_fetching",
+                        "message": "Fetching SPY option quotes.",
+                        "current": 0,
+                        "total": 1,
+                        "unit": "symbols",
+                    }
+                )
+            assert release_scan.wait(timeout=3.0)
+        return {"status": "ok", "command": command}
+
+    app = create_war_room_app(snapshot_provider=lambda: {}, command_runner=command_runner)
+    client = TestClient(app)
+
+    arm = client.post("/api/war-room/arm", json={"phrase": "ARM"})
+    assert arm.status_code == 204
+
+    start = client.post("/api/war-room/commands/scan", json={"async": True})
+    assert start.status_code == 202
+
+    blocked = client.post("/api/war-room/commands/manage", json={})
+
+    assert blocked.status_code == 409
+    payload = blocked.json()
+    assert payload["reason"] == "command_in_progress"
+    assert payload["command"] == "scan"
+    assert payload["status"] == "running"
+
+    release_scan.set()
 
 
 def test_trade_endpoint_requires_explicit_confirmation() -> None:
@@ -392,6 +521,89 @@ def test_create_war_room_app_retries_lazy_default_provider_creation_after_failur
     assert second.status_code == 200
     assert second.json()["threat_level"] == "nominal"
     assert attempts["count"] == 2
+
+
+def test_default_snapshot_provider_initializes_event_loop_for_worker_thread(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    dashboard_path = tmp_path / "dashboard.json"
+    dashboard_path.write_text(
+        '{"status":"idle","last_cycle":{},"error":null}',
+        encoding="utf-8",
+    )
+
+    class LoopBoundAccountService:
+        def fetch_account_snapshot(self) -> dict[str, float]:
+            asyncio.get_event_loop()
+            return {
+                "net_liquidation": 50_000.0,
+                "unrealized_pnl": 0.0,
+                "open_risk": 0.0,
+                "new_positions_today": 0,
+            }
+
+    runtime = SimpleNamespace(
+        dashboard_state_path=dashboard_path,
+        settings=SimpleNamespace(audit_db_path=tmp_path / "audit.db", mode="paper"),
+        account_service=LoopBoundAccountService(),
+    )
+    monkeypatch.setattr("trader_shawn.war_room.web.build_cli_runtime", lambda: runtime)
+
+    app = create_war_room_app(snapshot_provider=create_default_snapshot_provider())
+    client = TestClient(app)
+
+    response = client.get("/api/war-room/snapshot")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["command_status"]["broker"]["state"] == "healthy"
+    assert payload["risk_deck"]["net_liquidation"] == 50_000.0
+
+
+def test_default_command_runner_initializes_event_loop_for_worker_thread(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    dashboard_path = tmp_path / "dashboard.json"
+    dashboard_path.write_text(
+        '{"status":"idle","last_cycle":{},"error":null}',
+        encoding="utf-8",
+    )
+
+    class LoopBoundScanner:
+        def scan_candidates(self, symbols: list[str]) -> list[object]:
+            _ = symbols
+            asyncio.get_event_loop()
+            return []
+
+    runtime = SimpleNamespace(
+        config_dir=tmp_path / "config",
+        dashboard_state_path=dashboard_path,
+        settings=SimpleNamespace(
+            audit_db_path=tmp_path / "audit.db",
+            mode="paper",
+            live_enabled=False,
+            symbols=["AMD"],
+        ),
+        scanner=LoopBoundScanner(),
+        account_service=SimpleNamespace(fetch_account_snapshot=lambda: {}),
+    )
+    monkeypatch.setattr("trader_shawn.war_room.web.build_cli_runtime", lambda: runtime)
+    monkeypatch.setattr("trader_shawn.app.build_cli_runtime", lambda: runtime)
+
+    app = create_war_room_app()
+    client = TestClient(app)
+
+    arm = client.post("/api/war-room/arm", json={"phrase": "ARM"})
+    assert arm.status_code == 204
+
+    response = client.post("/api/war-room/commands/scan", json={})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["candidate_count"] == 0
 
 
 def test_default_command_path_returns_structured_config_error_on_runtime_init_failure(

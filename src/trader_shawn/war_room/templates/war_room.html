@@ -6,11 +6,11 @@
     <title>War Room</title>
     <link rel="stylesheet" href="/static/war_room.css">
 </head>
-<body data-mode="monitoring" data-threat="nominal">
+<body data-mode="monitoring" data-threat="nominal" data-busy="false">
     <main class="war-room">
         <section class="panel command-status">
             <h2>Command Status</h2>
-            <p>Core systems online. Monitoring live operations.</p>
+            <p data-command-copy>Core systems online. Monitoring live operations.</p>
             <div class="arm-controls">
                 <label for="arm-phrase">Authorization Phrase</label>
                 <div class="arm-row">
@@ -42,9 +42,23 @@
         <section class="panel threat-rail">
             <h2>Threat Rail</h2>
             <p>Threat Level: <strong data-threat-level>Nominal</strong></p>
-            <p>Type ARM to unlock</p>
+            <p data-threat-copy>Type ARM to unlock</p>
         </section>
     </main>
+    <section class="command-overlay" data-command-overlay hidden aria-live="polite" aria-busy="true">
+        <div class="command-overlay__backdrop"></div>
+        <div class="command-overlay__panel">
+            <div class="command-overlay__kicker">War Room Operation In Flight</div>
+            <h2 data-overlay-command>SCANNING</h2>
+            <p data-overlay-detail>Pulling broker state, option surfaces, and threat rails.</p>
+            <p class="command-overlay__progress-label" data-overlay-progress-label>Awaiting broker response.</p>
+            <div class="command-overlay__spinner" aria-hidden="true"></div>
+            <div class="command-overlay__progress" data-overlay-progress aria-hidden="true">
+                <span></span>
+            </div>
+            <ul class="command-overlay__event-log" data-overlay-events></ul>
+        </div>
+    </section>
     <script src="/static/war_room.js" defer></script>
 </body>
 </html>

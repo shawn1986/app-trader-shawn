@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, date, datetime
 from enum import Enum
 import json
 import math
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 from uuid import uuid4
 
 import click
@@ -16,6 +16,7 @@ from trader_shawn.ai.claude_cli_adapter import ClaudeCliAdapter
 from trader_shawn.ai.codex_adapter import CodexAdapter
 from trader_shawn.ai.service import AiDecisionService
 from trader_shawn.candidate_builder.credit_spread_builder import build_candidates
+from trader_shawn.candidate_builder.paper_watchlist_builder import build_paper_watchlist
 from trader_shawn.domain.enums import DecisionAction
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread, ManagedPositionRecord
 from trader_shawn.events.earnings_calendar import EarningsCalendar
@@ -41,6 +42,13 @@ class CliRuntime:
     position_manager: Any | None = None
     audit_logger: Any | None = None
     dashboard_state_path: Path | None = None
+    progress_callback: Callable[[dict[str, Any]], None] | None = None
+
+
+@dataclass(slots=True)
+class ScanMarketResult:
+    candidates: list[CandidateSpread]
+    watchlist: list[Any] = field(default_factory=list)
 
 
 class CliScanner:
@@ -49,18 +57,61 @@ class CliScanner:
         *,
         market_data_client: IbkrMarketDataClient,
         earnings_calendar: EarningsCalendar,
+        mode: str,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._market_data_client = market_data_client
         self._earnings_calendar = earnings_calendar
+        self._mode = mode
+        self._progress_callback = progress_callback
+
+    def set_progress_callback(
+        self,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        self._progress_callback = progress_callback
+
+    def _emit_progress(self, stage: str, message: str, **details: Any) -> None:
+        if not callable(self._progress_callback):
+            return
+        self._progress_callback(
+            {
+                "stage": stage,
+                "message": message,
+                **details,
+            }
+        )
 
     def scan_candidates(self, symbols: list[str]) -> list[CandidateSpread]:
+        return self.scan_market(symbols).candidates
+
+    def scan_market(self, symbols: list[str]) -> ScanMarketResult:
         as_of = date.today()
         candidates: list[CandidateSpread] = []
-        for symbol in symbols:
+        watchlist: list[Any] = []
+        total_symbols = len(symbols)
+        self._emit_progress(
+            "scan_started",
+            "Scan initiated.",
+            current=0,
+            total=total_symbols,
+            unit="symbols",
+        )
+        for index, symbol in enumerate(symbols, start=1):
+            symbol_candidate_count_before = len(candidates)
+            symbol_watchlist_count_before = len(watchlist)
             market_data_type = getattr(
                 self._market_data_client,
                 "market_data_type",
                 getattr(self._market_data_client, "_market_data_type", "unknown"),
+            )
+            self._emit_progress(
+                "scan_symbol_fetching",
+                f"Fetching {symbol} option quotes.",
+                symbol=symbol,
+                current=index - 1,
+                total=total_symbols,
+                unit="symbols",
             )
             click.echo(
                 f"scan: fetching {symbol} option quotes ({market_data_type} market data)",
@@ -75,16 +126,54 @@ class CliScanner:
                 dte = (date.fromisoformat(expiry) - as_of).days
                 if dte < 0:
                     continue
-                candidates.extend(
-                    build_candidates(
-                        symbol,
-                        dte,
-                        expiry_quotes,
-                        earnings_calendar=self._earnings_calendar,
-                        as_of=as_of,
-                    )
+                expiry_candidates = build_candidates(
+                    symbol,
+                    dte,
+                    expiry_quotes,
+                    earnings_calendar=self._earnings_calendar,
+                    as_of=as_of,
                 )
-        return candidates
+                candidates.extend(expiry_candidates)
+                if self._mode == "paper" and not expiry_candidates:
+                    watchlist.extend(
+                        build_paper_watchlist(
+                            symbol,
+                            dte,
+                            expiry_quotes,
+                            earnings_calendar=self._earnings_calendar,
+                            as_of=as_of,
+                        )
+                    )
+            self._emit_progress(
+                "scan_symbol_completed",
+                (
+                    f"{symbol} complete. {len(quotes)} quotes, "
+                    f"{len(candidates) - symbol_candidate_count_before} candidates, "
+                    f"{len(watchlist) - symbol_watchlist_count_before} watchlist."
+                ),
+                symbol=symbol,
+                quotes_count=len(quotes),
+                candidate_count=len(candidates) - symbol_candidate_count_before,
+                watchlist_count=len(watchlist) - symbol_watchlist_count_before,
+                cumulative_candidate_count=len(candidates),
+                cumulative_watchlist_count=len(watchlist),
+                current=index,
+                total=total_symbols,
+                unit="symbols",
+            )
+        self._emit_progress(
+            "scan_completed",
+            (
+                f"Scan complete. {len(candidates)} candidates, "
+                f"{len(watchlist)} watchlist observations."
+            ),
+            candidate_count=len(candidates),
+            watchlist_count=len(watchlist),
+            current=total_symbols,
+            total=total_symbols,
+            unit="symbols",
+        )
+        return ScanMarketResult(candidates=candidates, watchlist=watchlist)
 
 
 def run_trade_cycle(
@@ -341,6 +430,7 @@ def build_cli_runtime() -> CliRuntime:
         scanner=CliScanner(
             market_data_client=market_data_client,
             earnings_calendar=earnings_calendar,
+            mode=settings.mode,
         ),
         account_service=market_data_client,
         decision_service=_build_decision_service(settings),
@@ -371,16 +461,36 @@ def _trade_cycle_command() -> dict[str, Any]:
         _disconnect_runtime(runtime)
 
 
-def run_cli_command_with_runtime(command: str, runtime: CliRuntime) -> dict[str, Any]:
-    if command == "scan":
-        return _scan_command_with_runtime(runtime)
-    if command == "decide":
-        return _decide_command_with_runtime(runtime)
-    if command == "trade":
-        return _trade_command_with_runtime(runtime)
-    if command == "manage":
-        return _manage_command_with_runtime(runtime)
-    raise ValueError(f"Unsupported command: {command}")
+def run_cli_command_with_runtime(
+    command: str,
+    runtime: CliRuntime,
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    scanner = getattr(runtime, "scanner", None)
+    previous_runtime_progress = getattr(runtime, "progress_callback", None)
+    previous_scanner_progress = getattr(scanner, "_progress_callback", None)
+    runtime.progress_callback = progress_callback
+    if hasattr(scanner, "set_progress_callback"):
+        scanner.set_progress_callback(progress_callback)
+
+    try:
+        if command == "scan":
+            result = _scan_command_with_runtime(runtime)
+        elif command == "decide":
+            result = _decide_command_with_runtime(runtime)
+        elif command == "trade":
+            result = _trade_command_with_runtime(runtime)
+        elif command == "manage":
+            result = _manage_command_with_runtime(runtime)
+        else:
+            raise ValueError(f"Unsupported command: {command}")
+    finally:
+        runtime.progress_callback = previous_runtime_progress
+        if hasattr(scanner, "set_progress_callback"):
+            scanner.set_progress_callback(previous_scanner_progress)
+
+    return result
 
 
 def _scan_command() -> dict[str, Any]:
@@ -394,15 +504,20 @@ def _scan_command() -> dict[str, Any]:
 
 
 def _scan_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
-    candidates, candidate_error = _scan_candidates(runtime, command="scan")
-    if candidate_error is not None:
-        return candidate_error
-    return {
+    scan_result, scan_error = _scan_market(runtime, command="scan")
+    if scan_error is not None:
+        return scan_error
+    candidates = scan_result.candidates
+    response = {
         **_command_envelope("scan", runtime=runtime),
         "status": "ok",
         "candidate_count": len(candidates),
         "candidates": _json_safe(candidates),
     }
+    if runtime.settings.mode == "paper" and scan_result.watchlist:
+        response["watchlist_count"] = len(scan_result.watchlist)
+        response["watchlist"] = _json_safe(scan_result.watchlist)
+    return response
 
 
 def _decide_command() -> dict[str, Any]:
@@ -732,7 +847,23 @@ def _scan_candidates(
         "scan_option_candidates",
     )
     if scan_candidates is None:
-        return [], _runtime_unavailable(command, runtime=runtime, reason="scan_service_unavailable")
+        scan_market = _resolve_runtime_method(
+            getattr(runtime, "scanner", None),
+            "scan_market",
+        )
+        if scan_market is None:
+            return [], _runtime_unavailable(command, runtime=runtime, reason="scan_service_unavailable")
+        try:
+            market_scan = scan_market(list(runtime.settings.symbols))
+        except Exception as exc:
+            return [], _command_exception(
+                command,
+                runtime=runtime,
+                status="scan_error",
+                reason="scan_failed",
+                exc=exc,
+            )
+        return list(_coerce_scan_market_result(market_scan).candidates), None
 
     try:
         candidates = scan_candidates(list(runtime.settings.symbols))
@@ -746,6 +877,52 @@ def _scan_candidates(
         )
 
     return list(candidates), None
+
+
+def _scan_market(
+    runtime: CliRuntime,
+    *,
+    command: str,
+) -> tuple[ScanMarketResult, dict[str, Any] | None]:
+    scan_market = _resolve_runtime_method(
+        getattr(runtime, "scanner", None),
+        "scan_market",
+    )
+    if scan_market is None:
+        candidates, candidate_error = _scan_candidates(runtime, command=command)
+        return ScanMarketResult(candidates=list(candidates), watchlist=[]), candidate_error
+
+    try:
+        result = scan_market(list(runtime.settings.symbols))
+    except Exception as exc:
+        return ScanMarketResult(candidates=[], watchlist=[]), _command_exception(
+            command,
+            runtime=runtime,
+            status="scan_error",
+            reason="scan_failed",
+            exc=exc,
+        )
+
+    return _coerce_scan_market_result(result), None
+
+
+def _coerce_scan_market_result(result: Any) -> ScanMarketResult:
+    if isinstance(result, ScanMarketResult):
+        return ScanMarketResult(
+            candidates=list(result.candidates),
+            watchlist=list(result.watchlist),
+        )
+
+    if isinstance(result, Sequence) and not isinstance(
+        result,
+        (str, bytes, bytearray, dict),
+    ):
+        return ScanMarketResult(candidates=list(result), watchlist=[])
+
+    return ScanMarketResult(
+        candidates=list(getattr(result, "candidates", [])),
+        watchlist=list(getattr(result, "watchlist", [])),
+    )
 
 
 def _decide_on_candidates(

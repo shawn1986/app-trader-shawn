@@ -230,6 +230,13 @@ python -m trader_shawn.app scan
 - options quote 是否可讀
 - symbols / expiry / spread builder 是否正常
 
+補充：
+
+- `scan` 一律回傳正式候選欄位：`candidate_count` / `candidates`
+- `paper` mode 下，如果資料不足以通過正式交易門檻，`scan` 會額外回傳 `watchlist_count` / `watchlist`
+- `watchlist` 是觀察名單，不會被 `decide` 或 `trade` 當成正式可交易候選
+- `watchlist.flags` 會指出常見問題，例如 `missing_delta`、`low_open_interest`、`low_volume`、`missing_market_prices`
+
 ### `decide`
 
 執行 scan，然後呼叫 AI provider 做交易決策。不送單。
@@ -567,9 +574,3 @@ python -m trader_shawn.app trade
 ```
 
 或在 War Room 中輸入 `ARM` 後使用控制區，`trade` 仍需二次確認。
-
-
-模擬交易用戶名
-kqxnko561
-模擬交易賬戶號碼
-DUK088172

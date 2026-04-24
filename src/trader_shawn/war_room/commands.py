@@ -64,12 +64,17 @@ def run_runtime_command(
     payload: dict[str, Any] | None = None,
     *,
     runtime: Any | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     _ = payload
     if runtime is not None:
         if command not in {"scan", "decide", "manage", "trade"}:
             raise UnsupportedWarRoomCommand(command)
-        return run_cli_command_with_runtime(command, runtime)
+        return run_cli_command_with_runtime(
+            command,
+            runtime,
+            progress_callback=progress_callback,
+        )
 
     command_map: dict[str, RuntimeCommand] = {
         "scan": _scan_command,

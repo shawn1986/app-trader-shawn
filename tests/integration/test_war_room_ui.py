@@ -33,8 +33,48 @@ def live_server():
             "threat_rail": {"level": threat_state["value"]},
         }
 
-    def command_runner(command: str, payload: dict[str, object] | None = None) -> dict[str, str]:
+    def command_runner(
+        command: str,
+        payload: dict[str, object] | None = None,
+        *,
+        progress_callback=None,
+    ) -> dict[str, str]:
         _ = payload
+        if command == "scan":
+            if callable(progress_callback):
+                progress_callback(
+                    {
+                        "stage": "scan_symbol_fetching",
+                        "message": "Fetching SPY option quotes.",
+                        "symbol": "SPY",
+                        "current": 0,
+                        "total": 3,
+                        "unit": "symbols",
+                    }
+                )
+            time.sleep(0.2)
+            if callable(progress_callback):
+                progress_callback(
+                    {
+                        "stage": "scan_symbol_completed",
+                        "message": "SPY complete. 0 quotes, 0 candidates, 1 watchlist.",
+                        "symbol": "SPY",
+                        "current": 1,
+                        "total": 3,
+                        "unit": "symbols",
+                    }
+                )
+                progress_callback(
+                    {
+                        "stage": "scan_symbol_fetching",
+                        "message": "Fetching QQQ option quotes.",
+                        "symbol": "QQQ",
+                        "current": 1,
+                        "total": 3,
+                        "unit": "symbols",
+                    }
+                )
+            time.sleep(0.2)
         if command == "manage":
             threat_state["value"] = "critical"
         if command == "trade":
@@ -162,6 +202,38 @@ def test_war_room_relocks_after_armed_session_expires(live_server) -> None:
         page.wait_for_selector("[data-trade-confirm][hidden]")
         page.wait_for_function(
             "() => document.querySelector('[data-mission-log] li')?.textContent.includes('armed_mode_required')"
+        )
+
+        browser.close()
+
+
+def test_war_room_shows_full_overlay_while_command_is_running(live_server) -> None:
+    with sync_playwright() as p:
+        browser = _launch_chromium_or_skip(p)
+        page = browser.new_page()
+        page.goto(f"{live_server}/war-room")
+        page.fill("[data-arm-input]", "ARM")
+        page.click("[data-arm-submit]")
+        page.wait_for_selector('[data-command="scan"]:not([disabled])')
+
+        page.click('[data-command="scan"]')
+        page.wait_for_selector("[data-command-overlay]:not([hidden])")
+        page.wait_for_function(
+            "() => document.querySelector('[data-overlay-command]')?.textContent.includes('SCAN')"
+        )
+        page.wait_for_function(
+            "() => document.querySelector('[data-overlay-progress-label]')?.textContent.includes('symbols')"
+        )
+        page.wait_for_function(
+            "() => document.querySelector('[data-overlay-events]')?.textContent.includes('Fetching SPY option quotes')"
+        )
+        page.wait_for_selector('[data-command="manage"][disabled]')
+
+        page.wait_for_function(
+            "() => document.querySelector('[data-command-overlay]')?.hidden === true"
+        )
+        page.wait_for_function(
+            "() => document.querySelector('[data-mission-log] li')?.textContent.includes('SCAN ok')"
         )
 
         browser.close()

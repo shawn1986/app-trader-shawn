@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
+import asyncio
 import inspect
 from pathlib import Path
 import threading
 import time
 from typing import Any, Callable
+from uuid import uuid4
 
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -26,7 +29,146 @@ from trader_shawn.war_room.service import build_war_room_snapshot
 
 
 SnapshotProvider = Callable[[], dict[str, Any]]
-CommandRunner = Callable[[str, dict[str, Any] | None], dict[str, Any]]
+CommandRunner = Callable[..., dict[str, Any]]
+SUPPORTED_COMMANDS = frozenset({"scan", "decide", "manage", "trade"})
+
+
+class CommandExecutionStore:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state = self._idle_state()
+
+    def _idle_state(self) -> dict[str, Any]:
+        return {
+            "status": "idle",
+            "job_id": None,
+            "command": None,
+            "started_at": None,
+            "updated_at": None,
+            "completed_at": None,
+            "current_message": None,
+            "progress": {"current": 0, "total": None, "unit": "steps"},
+            "events": [],
+            "result": None,
+            "error": None,
+        }
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return deepcopy(self._state)
+
+    def start(self, command: str) -> dict[str, Any] | None:
+        now = datetime.now(UTC).isoformat()
+        with self._lock:
+            if self._state.get("status") == "running":
+                return None
+            self._state = {
+                "status": "running",
+                "job_id": uuid4().hex,
+                "command": command,
+                "started_at": now,
+                "updated_at": now,
+                "completed_at": None,
+                "current_message": f"{command.upper()} command accepted.",
+                "progress": {"current": 0, "total": None, "unit": "steps"},
+                "events": [
+                    {
+                        "timestamp": now,
+                        "stage": "command_started",
+                        "message": f"{command.upper()} command accepted.",
+                    }
+                ],
+                "result": None,
+                "error": None,
+            }
+            return deepcopy(self._state)
+
+    def record(self, job_id: str, payload: dict[str, Any]) -> None:
+        timestamp = datetime.now(UTC).isoformat()
+        with self._lock:
+            if self._state.get("job_id") != job_id:
+                return
+            self._state["updated_at"] = timestamp
+            message = payload.get("message")
+            if isinstance(message, str) and message:
+                self._state["current_message"] = message
+
+            current = payload.get("current")
+            total = payload.get("total")
+            unit = payload.get("unit")
+            progress = self._state.setdefault(
+                "progress",
+                {"current": 0, "total": None, "unit": "steps"},
+            )
+            if isinstance(current, int) and not isinstance(current, bool):
+                progress["current"] = current
+            if isinstance(total, int) and not isinstance(total, bool):
+                progress["total"] = total
+            if isinstance(unit, str) and unit:
+                progress["unit"] = unit
+
+            event = {
+                "timestamp": timestamp,
+                **{
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"result", "error"}
+                },
+            }
+            events = self._state.setdefault("events", [])
+            events.append(event)
+            if len(events) > 16:
+                del events[:-16]
+
+    def finish(self, job_id: str, result: dict[str, Any]) -> None:
+        timestamp = datetime.now(UTC).isoformat()
+        with self._lock:
+            if self._state.get("job_id") != job_id:
+                return
+            self._state["status"] = "completed"
+            self._state["updated_at"] = timestamp
+            self._state["completed_at"] = timestamp
+            self._state["result"] = result
+            self._state["error"] = None
+            self._state["events"].append(
+                {
+                    "timestamp": timestamp,
+                    "stage": "command_completed",
+                    "message": (
+                        f"{str(self._state.get('command') or '').upper()} command "
+                        f"completed with status {result.get('status', 'unknown')}."
+                    ),
+                    "result_status": result.get("status"),
+                }
+            )
+            if len(self._state["events"]) > 16:
+                del self._state["events"][:-16]
+
+    def fail(self, job_id: str, exc: Exception) -> None:
+        timestamp = datetime.now(UTC).isoformat()
+        with self._lock:
+            if self._state.get("job_id") != job_id:
+                return
+            self._state["status"] = "failed"
+            self._state["updated_at"] = timestamp
+            self._state["completed_at"] = timestamp
+            self._state["error"] = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            }
+            self._state["events"].append(
+                {
+                    "timestamp": timestamp,
+                    "stage": "command_failed",
+                    "message": (
+                        f"{str(self._state.get('command') or '').upper()} command "
+                        f"failed: {exc}"
+                    ),
+                    "error_type": type(exc).__name__,
+                }
+            )
+            if len(self._state["events"]) > 16:
+                del self._state["events"][:-16]
 
 
 def create_war_room_app(
@@ -46,6 +188,7 @@ def create_war_room_app(
     else:
         provider = snapshot_provider or _lazy_default_snapshot_provider()
         runner = command_runner or run_runtime_command
+    command_store = CommandExecutionStore()
     armed_sessions = ArmedSessionStore()
 
     @app.get("/")
@@ -62,6 +205,7 @@ def create_war_room_app(
 
     @app.get("/api/war-room/snapshot")
     def get_war_room_snapshot() -> JSONResponse:
+        _ensure_thread_event_loop()
         return JSONResponse(provider())
 
     @app.post("/api/war-room/arm")
@@ -83,20 +227,130 @@ def create_war_room_app(
         if not armed_sessions.is_armed(request.cookies.get("war_room_armed")):
             return JSONResponse({"reason": "armed_mode_required"}, status_code=403)
 
+        if command_name not in SUPPORTED_COMMANDS:
+            return JSONResponse(
+                {"reason": "unsupported_command", "command": command_name},
+                status_code=404,
+            )
+
         if command_name == "trade" and payload.get("confirmed") is not True:
             return JSONResponse({"reason": "trade_confirmation_required"}, status_code=409)
 
+        started = command_store.start(command_name)
+        if started is None:
+            return JSONResponse(
+                {
+                    "reason": "command_in_progress",
+                    **command_store.snapshot(),
+                },
+                status_code=409,
+            )
+
+        if payload.get("async") is True:
+            async_payload = dict(payload)
+            async_payload.pop("async", None)
+            worker = threading.Thread(
+                target=_run_async_command,
+                args=(command_store, started["job_id"], runner, command_name, async_payload),
+                daemon=True,
+            )
+            worker.start()
+            return JSONResponse(
+                {
+                    "status": "accepted",
+                    "command": command_name,
+                    "job_id": started["job_id"],
+                },
+                status_code=202,
+            )
+
+        _ensure_thread_event_loop()
         try:
-            result = runner(command_name, payload)
+            result = _run_command_runner(
+                runner,
+                command_name,
+                payload,
+                progress_callback=lambda event: command_store.record(started["job_id"], event),
+            )
         except UnsupportedWarRoomCommand as exc:
+            command_store.fail(started["job_id"], exc)
             return JSONResponse(
                 {"reason": "unsupported_command", "command": exc.command},
                 status_code=404,
             )
+        except Exception as exc:
+            command_store.fail(started["job_id"], exc)
+            raise
+
+        command_store.finish(started["job_id"], result)
 
         return JSONResponse(result)
 
+    @app.get("/api/war-room/commands/status")
+    def get_command_status() -> JSONResponse:
+        return JSONResponse(command_store.snapshot())
+
     return app
+
+
+def _ensure_thread_event_loop() -> asyncio.AbstractEventLoop:
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
+
+
+def _run_command_runner(
+    runner: CommandRunner,
+    command_name: str,
+    payload: dict[str, Any] | None,
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    if _callable_accepts_keyword(runner, "progress_callback"):
+        return runner(command_name, payload, progress_callback=progress_callback)
+    return runner(command_name, payload)
+
+
+def _callable_accepts_keyword(func: Callable[..., Any], name: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == name:
+            return True
+    return False
+
+
+def _run_async_command(
+    command_store: CommandExecutionStore,
+    job_id: str,
+    runner: CommandRunner,
+    command_name: str,
+    payload: dict[str, Any],
+) -> None:
+    _ensure_thread_event_loop()
+    try:
+        result = _run_command_runner(
+            runner,
+            command_name,
+            payload,
+            progress_callback=lambda event: command_store.record(job_id, event),
+        )
+    except Exception as exc:
+        command_store.fail(job_id, exc)
+        return
+    command_store.finish(job_id, result)
 
 
 def create_default_snapshot_provider(
@@ -180,13 +434,39 @@ def _lazy_shared_default_provider_and_runner() -> tuple[SnapshotProvider, Comman
         except Exception as exc:
             return _degraded_snapshot(reason="snapshot_provider_error", exc=exc)
 
-    def lazy_runner(command: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def lazy_runner(
+        command: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        runtime_command_accepts_progress = _callable_accepts_keyword(
+            run_runtime_command,
+            "progress_callback",
+        )
         try:
             resolved_runtime = _ensure_runtime()
         except Exception:
+            if runtime_command_accepts_progress:
+                return run_runtime_command(
+                    command,
+                    payload,
+                    progress_callback=progress_callback,
+                )
             return run_runtime_command(command, payload)
         with runtime_use_lock:
-            return run_runtime_command(command, payload, runtime=resolved_runtime)
+            if runtime_command_accepts_progress:
+                return run_runtime_command(
+                    command,
+                    payload,
+                    runtime=resolved_runtime,
+                    progress_callback=progress_callback,
+                )
+            return run_runtime_command(
+                command,
+                payload,
+                runtime=resolved_runtime,
+            )
 
     return lazy_provider, lazy_runner
 

@@ -5,6 +5,7 @@
     --text: #d7e6f5;
     --warn: #ffb347;
     --danger: #ff4f5e;
+    --accent: #63d1ff;
 }
 
 * {
@@ -20,6 +21,10 @@ body {
         radial-gradient(circle at 20% 15%, #132436 0%, transparent 40%),
         radial-gradient(circle at 80% 80%, #141f30 0%, transparent 45%),
         linear-gradient(155deg, #050b12 0%, var(--bg) 55%, #0b1521 100%);
+}
+
+body[data-busy="true"] {
+    overflow: hidden;
 }
 
 .war-room {
@@ -92,6 +97,18 @@ body {
     background: linear-gradient(180deg, rgba(35, 72, 105, 0.55), rgba(18, 36, 53, 0.92));
     padding: 0.5rem 0.8rem;
     cursor: pointer;
+    transition:
+        transform 140ms ease,
+        border-color 140ms ease,
+        box-shadow 140ms ease,
+        opacity 140ms ease;
+}
+
+.arm-row button:hover,
+.command-grid button:hover,
+.trade-confirm button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 24px rgba(6, 12, 20, 0.28);
 }
 
 .command-grid {
@@ -104,6 +121,12 @@ body {
 .command-grid button[disabled] {
     cursor: not-allowed;
     opacity: 0.45;
+}
+
+.command-grid button[data-busy="true"] {
+    opacity: 1;
+    border-color: rgba(99, 209, 255, 0.8);
+    box-shadow: 0 0 0 1px rgba(99, 209, 255, 0.2), 0 0 24px rgba(99, 209, 255, 0.12);
 }
 
 .trade-confirm {
@@ -172,6 +195,171 @@ body[data-threat="critical"] .threat-rail [data-threat-level] {
     color: var(--danger);
 }
 
+.command-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: grid;
+    place-items: center;
+}
+
+.command-overlay[hidden] {
+    display: none;
+}
+
+.command-overlay__backdrop {
+    position: absolute;
+    inset: 0;
+    background:
+        radial-gradient(circle at 50% 20%, rgba(99, 209, 255, 0.14), transparent 30%),
+        linear-gradient(180deg, rgba(4, 8, 12, 0.72), rgba(4, 8, 12, 0.9));
+    backdrop-filter: blur(12px);
+}
+
+.command-overlay__panel {
+    position: relative;
+    width: min(560px, calc(100vw - 2rem));
+    padding: 2rem 2rem 1.6rem;
+    border-radius: 1rem;
+    border: 1px solid rgba(99, 209, 255, 0.24);
+    background:
+        linear-gradient(180deg, rgba(16, 30, 43, 0.96), rgba(9, 18, 28, 0.98));
+    box-shadow:
+        0 30px 80px rgba(0, 0, 0, 0.45),
+        inset 0 0 0 1px rgba(99, 209, 255, 0.08);
+    overflow: hidden;
+}
+
+.command-overlay__panel::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+        linear-gradient(120deg, transparent 0%, rgba(99, 209, 255, 0.08) 45%, transparent 100%);
+    transform: translateX(-100%);
+    animation: overlay-sweep 1.8s linear infinite;
+}
+
+.command-overlay__kicker {
+    position: relative;
+    margin-bottom: 0.7rem;
+    color: rgba(215, 230, 245, 0.64);
+    font-size: 0.78rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+}
+
+.command-overlay__panel h2 {
+    position: relative;
+    margin: 0;
+    font-size: clamp(1.4rem, 3vw, 2rem);
+    letter-spacing: 0.16em;
+    color: #f0f7ff;
+}
+
+.command-overlay__panel p {
+    position: relative;
+    margin: 0.8rem 0 1.3rem;
+    max-width: 32rem;
+    color: rgba(215, 230, 245, 0.8);
+}
+
+.command-overlay__progress-label {
+    margin-top: -0.25rem;
+    font-size: 0.82rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(99, 209, 255, 0.86);
+}
+
+.command-overlay__spinner {
+    position: relative;
+    width: 88px;
+    height: 88px;
+    margin: 0 auto 1.2rem;
+    border-radius: 50%;
+    border: 2px solid rgba(99, 209, 255, 0.15);
+    border-top-color: rgba(99, 209, 255, 0.95);
+    border-right-color: rgba(255, 179, 71, 0.85);
+    animation: overlay-spin 0.9s linear infinite;
+    box-shadow: 0 0 30px rgba(99, 209, 255, 0.16);
+}
+
+.command-overlay__spinner::before,
+.command-overlay__spinner::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+    inset: 12px;
+    border: 1px solid rgba(99, 209, 255, 0.18);
+}
+
+.command-overlay__spinner::after {
+    inset: 24px;
+    border-color: rgba(255, 179, 71, 0.28);
+}
+
+.command-overlay__progress {
+    position: relative;
+    height: 0.42rem;
+    border-radius: 999px;
+    background: rgba(99, 209, 255, 0.1);
+    overflow: hidden;
+}
+
+.command-overlay__progress span {
+    display: block;
+    width: 32%;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, rgba(99, 209, 255, 0.2), rgba(99, 209, 255, 0.95), rgba(255, 179, 71, 0.8));
+    animation: overlay-progress 1.1s ease-in-out infinite;
+}
+
+.command-overlay__progress[data-mode="determinate"] span {
+    width: var(--progress-value, 10%);
+    animation: none;
+}
+
+.command-overlay__event-log {
+    position: relative;
+    margin: 1rem 0 0;
+    padding-left: 1.2rem;
+    display: grid;
+    gap: 0.45rem;
+    color: rgba(215, 230, 245, 0.86);
+    max-height: 10rem;
+    overflow: auto;
+}
+
+.command-overlay__event-log li::marker {
+    color: rgba(99, 209, 255, 0.9);
+}
+
+@keyframes overlay-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes overlay-progress {
+    0% {
+        transform: translateX(-120%);
+    }
+    100% {
+        transform: translateX(340%);
+    }
+}
+
+@keyframes overlay-sweep {
+    0% {
+        transform: translateX(-100%);
+    }
+    100% {
+        transform: translateX(100%);
+    }
+}
+
 @media (max-width: 900px) {
     .war-room {
         grid-template-columns: 1fr;
@@ -180,5 +368,9 @@ body[data-threat="critical"] .threat-rail [data-threat-level] {
             "risk"
             "positions"
             "threat";
+    }
+
+    .command-overlay__panel {
+        padding: 1.5rem 1.2rem 1.2rem;
     }
 }
