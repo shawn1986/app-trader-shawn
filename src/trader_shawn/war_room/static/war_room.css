@@ -89,7 +89,8 @@ body[data-busy="true"] {
 }
 
 .arm-row button,
-.command-grid button,
+.workflow-cta button,
+.secondary-actions button,
 .trade-confirm button {
     border-radius: 0.45rem;
     border: 1px solid rgba(96, 155, 209, 0.42);
@@ -105,25 +106,53 @@ body[data-busy="true"] {
 }
 
 .arm-row button:hover,
-.command-grid button:hover,
+.workflow-cta button:hover,
+.secondary-actions button:hover,
 .trade-confirm button:hover {
     transform: translateY(-1px);
     box-shadow: 0 8px 24px rgba(6, 12, 20, 0.28);
 }
 
-.command-grid {
+.workflow-cta {
     margin-top: 1rem;
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.5rem;
+    gap: 0.45rem;
 }
 
-.command-grid button[disabled] {
+.workflow-cta button {
+    min-height: 3.35rem;
+    font-size: 1.05rem;
+    font-weight: 800;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+.workflow-cta p {
+    color: rgba(215, 230, 245, 0.72);
+    font-size: 0.9rem;
+}
+
+.secondary-actions {
+    margin-top: 0.7rem;
+    display: flex;
+    justify-content: flex-end;
+}
+
+.secondary-actions button {
+    min-width: 11rem;
+    padding: 0.42rem 0.7rem;
+    color: rgba(215, 230, 245, 0.84);
+    background: rgba(12, 23, 35, 0.72);
+}
+
+.workflow-cta button[disabled],
+.secondary-actions button[disabled] {
     cursor: not-allowed;
     opacity: 0.45;
 }
 
-.command-grid button[data-busy="true"] {
+.workflow-cta button[data-busy="true"],
+.secondary-actions button[data-busy="true"] {
     opacity: 1;
     border-color: rgba(99, 209, 255, 0.8);
     box-shadow: 0 0 0 1px rgba(99, 209, 255, 0.2), 0 0 24px rgba(99, 209, 255, 0.12);

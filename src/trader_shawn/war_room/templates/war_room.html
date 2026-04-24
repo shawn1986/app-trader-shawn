@@ -9,7 +9,7 @@
 <body data-mode="monitoring" data-threat="nominal" data-busy="false">
     <main class="war-room">
         <section class="panel command-status">
-            <h2>Command Status</h2>
+            <h2>Workflow</h2>
             <p data-command-copy>Core systems online. Monitoring live operations.</p>
             <div class="arm-controls">
                 <label for="arm-phrase">Authorization Phrase</label>
@@ -18,11 +18,12 @@
                     <button type="button" data-arm-submit>Unlock</button>
                 </div>
             </div>
-            <div class="command-grid">
-                <button type="button" data-command="scan" disabled>Scan</button>
-                <button type="button" data-command="decide" disabled>Decide</button>
-                <button type="button" data-command="manage" disabled>Manage</button>
-                <button type="button" data-command="trade" disabled>Trade</button>
+            <section class="workflow-cta" data-workflow-cta>
+                <button type="button" data-primary-command disabled>Unlock to start</button>
+                <p data-primary-tip>Unlock the War Room to begin with Scan.</p>
+            </section>
+            <div class="secondary-actions">
+                <button type="button" data-secondary-command="manage" disabled>Manage Positions</button>
             </div>
             <section class="next-actions" data-next-actions hidden aria-live="polite">
                 <h3 data-next-title>Next actions</h3>

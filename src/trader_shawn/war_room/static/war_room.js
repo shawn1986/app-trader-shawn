@@ -6,6 +6,7 @@ let busyCommand = null;
 let isArmed = false;
 let activeCommandJobId = null;
 let tradeReady = false;
+let primaryCommand = null;
 
 const COMMAND_COPY_DEFAULT = "Core systems online. Monitoring live operations.";
 const THREAT_COPY_DEFAULT = "Type ARM to unlock";
@@ -31,15 +32,31 @@ function commandDetail(value) {
     return "Running War Room command.";
 }
 
+function setPrimaryWorkflow(command, label, tip) {
+    primaryCommand = command;
+    const button = document.querySelector("[data-primary-command]");
+    const tipEl = document.querySelector("[data-primary-tip]");
+    if (button) {
+        button.textContent = label;
+        button.dataset.command = command || "";
+    }
+    if (tipEl) {
+        tipEl.textContent = tip;
+    }
+    syncCommandAvailability();
+}
+
 function syncCommandAvailability() {
-    document.querySelectorAll("[data-command]").forEach((button) => {
-        const commandName = button.dataset.command || "";
-        let commandDisabled = !isArmed || busyCommand !== null;
-        if (commandName === "trade" && !tradeReady) {
-            commandDisabled = true;
-        }
-        button.disabled = commandDisabled;
-        button.dataset.busy = busyCommand === button.dataset.command ? "true" : "false";
+    const primaryButton = document.querySelector("[data-primary-command]");
+    if (primaryButton) {
+        primaryButton.disabled = !isArmed || busyCommand !== null || primaryCommand === null;
+        primaryButton.dataset.busy = busyCommand === primaryCommand ? "true" : "false";
+    }
+
+    document.querySelectorAll("[data-secondary-command]").forEach((button) => {
+        const commandName = button.dataset.secondaryCommand || "";
+        button.disabled = !isArmed || busyCommand !== null;
+        button.dataset.busy = busyCommand === commandName ? "true" : "false";
     });
 
     const armInput = document.querySelector("[data-arm-input]");
@@ -333,15 +350,49 @@ function applyCommandOutcome(result) {
         tradeReady = false;
         hideTradeConfirm();
     }
+    if (command === "scan") {
+        const counts = scanCounts(result);
+        if (resultSeverity(result) === "error" || counts.candidates === 0) {
+            setPrimaryWorkflow(
+                "scan",
+                "Run Scan Again",
+                "No approved path yet. Review the notes below, then scan again after quotes or filters change.",
+            );
+        } else {
+            setPrimaryWorkflow(
+                "decide",
+                "Run Decide",
+                "Review the candidates below, then run the decision engine.",
+            );
+        }
+    }
     if (command === "decide") {
         pendingTrade = null;
         tradeReady = isApprovedDecision(result);
         hideTradeConfirm();
+        if (tradeReady) {
+            setPrimaryWorkflow(
+                "trade",
+                "Stage Trade",
+                "Decision approved. Stage the trade first; confirmation is a separate final step.",
+            );
+        } else {
+            setPrimaryWorkflow(
+                "scan",
+                "Run Scan Again",
+                "Decision did not approve a trade. Wait for better quotes or adjust scan filters before scanning again.",
+            );
+        }
     }
     if (command === "trade") {
         pendingTrade = null;
         tradeReady = false;
         hideTradeConfirm();
+        setPrimaryWorkflow(
+            "scan",
+            "Run Scan",
+            "Trade flow finished. Start the next opportunity with a fresh scan.",
+        );
     }
     renderCandidatePreview(result);
     renderNextActions(result);
@@ -417,6 +468,18 @@ function renderPersistentResultSummary(result) {
 function setArmedMode(armed) {
     isArmed = armed;
     document.body.dataset.mode = armed ? "armed" : "monitoring";
+    if (armed && primaryCommand === null) {
+        setPrimaryWorkflow(
+            "scan",
+            "Run Scan",
+            "First step: scan option quotes and build candidate spreads.",
+        );
+        return;
+    }
+    if (!armed) {
+        setPrimaryWorkflow(null, "Unlock to start", "Unlock the War Room to begin with Scan.");
+        return;
+    }
     syncCommandAvailability();
 }
 
@@ -763,6 +826,11 @@ async function runCommand(commandName) {
         }
         pendingTrade = {command: "trade"};
         showTradeConfirm();
+        setPrimaryWorkflow(
+            null,
+            "Trade Staged",
+            "Final step: review the staged trade, then confirm only if you want to send the order.",
+        );
         return;
     }
 
@@ -836,10 +904,24 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    document.querySelectorAll("[data-command]").forEach((button) => {
+    const primaryButton = document.querySelector("[data-primary-command]");
+    if (primaryButton) {
+        primaryButton.addEventListener("click", () => {
+            if (!primaryCommand) {
+                return;
+            }
+            const command = primaryCommand;
+            runCommand(command).catch(() =>
+                prependMissionResult({command, status: "failed"}),
+            );
+        });
+    }
+
+    document.querySelectorAll("[data-secondary-command]").forEach((button) => {
         button.addEventListener("click", () => {
-            runCommand(button.dataset.command).catch(() =>
-                prependMissionResult({command: button.dataset.command, status: "failed"}),
+            const command = button.dataset.secondaryCommand;
+            runCommand(command).catch(() =>
+                prependMissionResult({command, status: "failed"}),
             );
         });
     });
