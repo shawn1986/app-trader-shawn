@@ -74,6 +74,10 @@ function resultSeverity(result) {
     if (Number(result?.symbol_error_count || 0) > 0) {
         return "warning";
     }
+    const decisionAction = String(result?.decision?.action || "").toLowerCase();
+    if (["reject", "hold"].includes(decisionAction)) {
+        return "warning";
+    }
     if (["ok", "ready", "accepted", "submitted"].includes(status)) {
         return "ok";
     }
@@ -90,6 +94,32 @@ function scanCounts(result) {
         candidates: Number(result?.candidate_count || 0),
         watchlist: Number(result?.watchlist_count || 0),
     };
+}
+
+function formatNumber(value, digits = 2) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+        return "--";
+    }
+    return number.toFixed(digits).replace(/\.?0+$/, "");
+}
+
+function formatPercent(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+        return "--";
+    }
+    return `${Math.round(number * 100)}%`;
+}
+
+function formatStrategy(value) {
+    return String(value || "spread").replaceAll("_", " ");
+}
+
+function candidateStrikeText(candidate) {
+    const shortStrike = candidate?.short_strike ?? candidate?.short_leg?.strike;
+    const longStrike = candidate?.long_strike ?? candidate?.long_leg?.strike;
+    return `${formatNumber(shortStrike)} / ${formatNumber(longStrike)}`;
 }
 
 function summarizeScanResult(result) {
@@ -167,6 +197,30 @@ function nextActionModel(result) {
             ],
         };
     }
+    const decisionAction = String(result?.decision?.action || "").toLowerCase();
+    if (command === "decide" && ["reject", "hold"].includes(decisionAction)) {
+        const decisionLabel = decisionAction === "reject" ? "rejected" : "held";
+        return {
+            title: `Decision ${decisionLabel}`,
+            summary: result?.decision?.reason || "The decision stack did not approve a trade.",
+            actions: [
+                "Review the rejection reason before changing filters.",
+                "Run Scan again after quotes refresh if liquidity improves.",
+                "Keep Trade locked unless Decide returns approve.",
+            ],
+        };
+    }
+    if (command === "decide" && resultSeverity(result) === "error") {
+        return {
+            title: "Decision provider failed",
+            summary: result?.message || result?.reason || "The decision provider did not return a usable decision.",
+            actions: [
+                "Check the Claude CLI session and authentication.",
+                "Increase provider_timeout_seconds if the provider is timing out.",
+                "Run Decide again after the provider is healthy.",
+            ],
+        };
+    }
     if (isApprovedDecision(result)) {
         return {
             title: "Trade ready",
@@ -215,6 +269,63 @@ function renderNextActions(result) {
     root.hidden = false;
 }
 
+function renderCandidatePreview(result) {
+    const root = document.querySelector("[data-candidate-preview]");
+    const list = document.querySelector("[data-candidate-list]");
+    if (!root || !list) {
+        return;
+    }
+
+    const command = String(result?.command || "").toLowerCase();
+    const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
+    if (command !== "scan" || candidates.length === 0) {
+        root.hidden = true;
+        list.replaceChildren();
+        return;
+    }
+
+    list.replaceChildren();
+    candidates.slice(0, 5).forEach((candidate) => {
+        const row = document.createElement("article");
+        const main = document.createElement("div");
+        const name = document.createElement("span");
+        const dte = document.createElement("span");
+        const strategy = document.createElement("div");
+        const metrics = document.createElement("div");
+
+        row.className = "candidate-row";
+        main.className = "candidate-row__main";
+        strategy.className = "candidate-row__strategy";
+        metrics.className = "candidate-row__metrics";
+
+        name.textContent = `${candidate?.ticker || "symbol"} ${candidateStrikeText(candidate)}`;
+        dte.textContent = `${candidate?.dte ?? "--"} DTE`;
+        strategy.textContent = formatStrategy(candidate?.strategy);
+
+        [
+            `Credit ${formatNumber(candidate?.credit)}`,
+            `Max loss ${formatNumber(candidate?.max_loss)}`,
+            `Delta ${formatNumber(candidate?.short_delta)}`,
+            `POP ${formatPercent(candidate?.pop)}`,
+            `B/A ${formatNumber(candidate?.bid_ask_ratio)}`,
+            `Width ${formatNumber(candidate?.width)}`,
+        ].forEach((metric) => {
+            const item = document.createElement("span");
+            item.textContent = metric;
+            metrics.appendChild(item);
+        });
+
+        main.appendChild(name);
+        main.appendChild(dte);
+        row.appendChild(main);
+        row.appendChild(strategy);
+        row.appendChild(metrics);
+        list.appendChild(row);
+    });
+
+    root.hidden = false;
+}
+
 function applyCommandOutcome(result) {
     const command = String(result?.command || "").toLowerCase();
     if (command === "scan" || command === "manage") {
@@ -232,6 +343,7 @@ function applyCommandOutcome(result) {
         tradeReady = false;
         hideTradeConfirm();
     }
+    renderCandidatePreview(result);
     renderNextActions(result);
     syncCommandAvailability();
 }
@@ -240,6 +352,10 @@ function resultHeadline(result) {
     const command = result?.command ? String(result.command).toUpperCase() : "SYSTEM";
     const severity = resultSeverity(result);
     if (severity === "warning") {
+        const decisionAction = String(result?.decision?.action || "").toLowerCase();
+        if (command === "DECIDE" && decisionAction) {
+            return `${command} ${decisionAction}`;
+        }
         return `${command} warning`;
     }
     const status = result?.status ? String(result.status) : "ok";
@@ -254,6 +370,14 @@ function resultDetail(result) {
             ? `${firstError.symbol || "symbol"}: ${firstError.message || firstError.error_type || "failed"}`
             : "Review symbol errors.";
         return `${count} symbol errors. ${firstErrorText}`;
+    }
+    if (result?.message) {
+        const errorType = result?.error_type ? `${result.error_type}: ` : "";
+        const reason = result?.reason ? `${result.reason}. ` : "";
+        return `${reason}${errorType}${result.message}`;
+    }
+    if (String(result?.command || "").toLowerCase() === "decide" && result?.decision?.reason) {
+        return String(result.decision.reason);
     }
     if (result?.reason) {
         return String(result.reason);
@@ -364,6 +488,7 @@ function showCommandOverlay(commandName) {
     if (overlay) {
         overlay.hidden = false;
     }
+    renderCandidatePreview(null);
     renderNextActions(null);
     renderOverlayEvents([]);
     setOverlayProgress(null, null, null);
@@ -401,6 +526,7 @@ function relockWarRoom() {
     pendingTrade = null;
     tradeReady = false;
     hideTradeConfirm();
+    renderCandidatePreview(null);
     renderNextActions(null);
     hideCommandOverlay();
 }

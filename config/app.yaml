@@ -6,4 +6,11 @@ ibkr:
   port: 4002
   client_id: 7
   request_timeout_seconds: 30
+scan_filters:
+  min_open_interest: 0
+  min_volume: 0
+  min_abs_delta: 0.10
+  max_abs_delta: 0.35
+  max_width: 5
+  max_bid_ask_ratio: 2.50
 audit_db_path: runtime/audit.db

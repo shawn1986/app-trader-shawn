@@ -1,6 +1,9 @@
 from datetime import date
 
-from trader_shawn.candidate_builder.credit_spread_builder import build_candidates
+from trader_shawn.candidate_builder.credit_spread_builder import (
+    CandidateFilterSettings,
+    build_candidates,
+)
 from trader_shawn.events.earnings_calendar import EarningsCalendar
 from trader_shawn.market_data.ibkr_market_data import IbkrMarketDataClient
 from trader_shawn.domain.models import OptionQuote
@@ -399,6 +402,51 @@ def test_build_candidates_rejects_low_credit_spread_with_wide_market() -> None:
     ]
 
     assert build_candidates("AMD", 10, quotes) == []
+
+
+def test_build_candidates_accepts_relaxed_paper_filters() -> None:
+    quotes = [
+        OptionQuote(
+            symbol="AMD",
+            expiry="2026-05-08",
+            strike=295,
+            right="P",
+            bid=1.00,
+            ask=1.30,
+            delta=-0.126,
+            open_interest=0,
+            volume=0,
+        ),
+        OptionQuote(
+            symbol="AMD",
+            expiry="2026-05-08",
+            strike=290,
+            right="P",
+            bid=0.70,
+            ask=0.90,
+            delta=-0.08,
+            open_interest=0,
+            volume=0,
+        ),
+    ]
+
+    candidates = build_candidates(
+        "AMD",
+        13,
+        quotes,
+        filters=CandidateFilterSettings(
+            min_open_interest=0,
+            min_volume=0,
+            min_abs_delta=0.10,
+            max_abs_delta=0.35,
+            max_width=5,
+            max_bid_ask_ratio=2.50,
+        ),
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].short_strike == 295
+    assert candidates[0].long_strike == 290
 
 
 def test_earnings_calendar_detects_blocking_event_in_window() -> None:

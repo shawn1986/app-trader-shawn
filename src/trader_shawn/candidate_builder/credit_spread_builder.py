@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
 from trader_shawn.domain.models import CandidateSpread, OptionQuote
 from trader_shawn.events.earnings_calendar import EarningsCalendar
@@ -14,6 +16,19 @@ MAX_WIDTH = 5
 MAX_BID_ASK_RATIO = 0.15
 
 
+@dataclass(frozen=True, slots=True)
+class CandidateFilterSettings:
+    min_open_interest: int = MIN_OPEN_INTEREST
+    min_volume: int = MIN_VOLUME
+    min_abs_delta: float = MIN_ABS_DELTA
+    max_abs_delta: float = MAX_ABS_DELTA
+    max_width: float = MAX_WIDTH
+    max_bid_ask_ratio: float = MAX_BID_ASK_RATIO
+
+
+DEFAULT_FILTERS = CandidateFilterSettings()
+
+
 def build_candidates(
     ticker: str,
     dte: int,
@@ -21,8 +36,10 @@ def build_candidates(
     *,
     earnings_calendar: EarningsCalendar | None = None,
     as_of: date | None = None,
+    filters: Any | None = None,
 ) -> list[CandidateSpread]:
     candidates: list[CandidateSpread] = []
+    filter_settings = _coerce_filter_settings(filters)
 
     candidates.extend(
         _build_candidates_for_right(
@@ -34,6 +51,7 @@ def build_candidates(
             width_fn=lambda short_leg, long_leg: short_leg.strike - long_leg.strike,
             earnings_calendar=earnings_calendar,
             as_of=as_of,
+            filters=filter_settings,
         )
     )
     candidates.extend(
@@ -46,6 +64,7 @@ def build_candidates(
             width_fn=lambda short_leg, long_leg: long_leg.strike - short_leg.strike,
             earnings_calendar=earnings_calendar,
             as_of=as_of,
+            filters=filter_settings,
         )
     )
 
@@ -62,6 +81,7 @@ def _build_candidates_for_right(
     width_fn: Callable[[OptionQuote, OptionQuote], float],
     earnings_calendar: EarningsCalendar | None,
     as_of: date | None,
+    filters: CandidateFilterSettings,
 ) -> list[CandidateSpread]:
     short_leg_candidates = sorted(
         (
@@ -70,9 +90,9 @@ def _build_candidates_for_right(
             if quote.ticker == ticker
             and quote.right == right
             and quote.delta is not None
-            and MIN_ABS_DELTA <= abs(quote.delta) <= MAX_ABS_DELTA
-            and quote.open_interest >= MIN_OPEN_INTEREST
-            and quote.volume >= MIN_VOLUME
+            and filters.min_abs_delta <= abs(quote.delta) <= filters.max_abs_delta
+            and quote.open_interest >= filters.min_open_interest
+            and quote.volume >= filters.min_volume
         ),
         key=lambda quote: (quote.expiry, quote.strike),
     )
@@ -85,7 +105,7 @@ def _build_candidates_for_right(
     for short_leg in short_leg_candidates:
         for long_leg in long_leg_candidates:
             width = width_fn(short_leg, long_leg)
-            if short_leg.expiry != long_leg.expiry or width <= 0 or width > MAX_WIDTH:
+            if short_leg.expiry != long_leg.expiry or width <= 0 or width > filters.max_width:
                 continue
 
             if _has_blocking_event(
@@ -103,7 +123,7 @@ def _build_candidates_for_right(
                 continue
 
             bid_ask_ratio = ((short_leg.ask - short_leg.bid) + (long_leg.ask - long_leg.bid)) / credit
-            if bid_ask_ratio > MAX_BID_ASK_RATIO:
+            if bid_ask_ratio > filters.max_bid_ask_ratio:
                 continue
             short_delta = abs(short_leg.delta)
 
@@ -124,6 +144,21 @@ def _build_candidates_for_right(
                 )
             )
     return candidates
+
+
+def _coerce_filter_settings(filters: Any | None) -> CandidateFilterSettings:
+    if filters is None:
+        return DEFAULT_FILTERS
+    if isinstance(filters, CandidateFilterSettings):
+        return filters
+    return CandidateFilterSettings(
+        min_open_interest=int(getattr(filters, "min_open_interest")),
+        min_volume=int(getattr(filters, "min_volume")),
+        min_abs_delta=float(getattr(filters, "min_abs_delta")),
+        max_abs_delta=float(getattr(filters, "max_abs_delta")),
+        max_width=float(getattr(filters, "max_width")),
+        max_bid_ask_ratio=float(getattr(filters, "max_bid_ask_ratio")),
+    )
 
 
 def _has_blocking_event(

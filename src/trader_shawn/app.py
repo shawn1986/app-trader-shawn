@@ -61,11 +61,13 @@ class CliScanner:
         market_data_client: IbkrMarketDataClient,
         earnings_calendar: EarningsCalendar,
         mode: str,
+        candidate_filters: Any | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._market_data_client = market_data_client
         self._earnings_calendar = earnings_calendar
         self._mode = mode
+        self._candidate_filters = candidate_filters
         self._progress_callback = progress_callback
 
     def set_progress_callback(
@@ -173,6 +175,7 @@ class CliScanner:
                     expiry_quotes,
                     earnings_calendar=self._earnings_calendar,
                     as_of=as_of,
+                    filters=self._candidate_filters,
                 )
                 candidates.extend(expiry_candidates)
                 if self._mode == "paper" and not expiry_candidates:
@@ -183,6 +186,7 @@ class CliScanner:
                             expiry_quotes,
                             earnings_calendar=self._earnings_calendar,
                             as_of=as_of,
+                            filters=self._candidate_filters,
                         )
                     )
             self._emit_progress(
@@ -530,6 +534,7 @@ def build_cli_runtime() -> CliRuntime:
             market_data_client=market_data_client,
             earnings_calendar=earnings_calendar,
             mode=settings.mode,
+            candidate_filters=getattr(settings, "scan_filters", None),
         ),
         account_service=market_data_client,
         decision_service=_build_decision_service(settings),

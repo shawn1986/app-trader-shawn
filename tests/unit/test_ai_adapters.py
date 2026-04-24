@@ -76,6 +76,31 @@ def test_codex_adapter_parses_jsonl_assistant_message(
     }
 
 
+def test_claude_adapter_parses_result_wrapper_json_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": '{"action":"reject","reason":"too concentrated"}',
+        }
+    )
+
+    def fake_run(*args, **kwargs) -> CompletedProcess[str]:
+        return CompletedProcess(args=args[0], returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    adapter = ClaudeCliAdapter(command="fake-claude")
+
+    assert adapter.request('{"ticker":"AMD"}') == {
+        "action": "reject",
+        "reason": "too concentrated",
+    }
+
+
 def test_codex_adapter_rejects_jsonl_without_assistant_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

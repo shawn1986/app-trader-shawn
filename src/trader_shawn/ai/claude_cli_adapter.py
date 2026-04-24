@@ -33,4 +33,17 @@ def _parse_stdout(provider: str, stdout: str, stderr: str) -> dict[str, Any]:
         raise AiProviderError(provider, f"malformed json: {exc.msg}", stdout=stdout, stderr=stderr) from exc
     if not isinstance(payload, dict):
         raise AiProviderError(provider, "expected top-level JSON object", stdout=stdout, stderr=stderr)
+    if payload.get("type") == "result" and isinstance(payload.get("result"), str):
+        try:
+            result_payload = json.loads(payload["result"])
+        except json.JSONDecodeError as exc:
+            raise AiProviderError(
+                provider,
+                f"malformed result json: {exc.msg}",
+                stdout=stdout,
+                stderr=stderr,
+            ) from exc
+        if not isinstance(result_payload, dict):
+            raise AiProviderError(provider, "expected result JSON object", stdout=stdout, stderr=stderr)
+        return result_payload
     return payload

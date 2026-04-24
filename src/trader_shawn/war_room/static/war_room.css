@@ -176,6 +176,61 @@ body[data-busy="true"] {
     line-height: 1.35;
 }
 
+.candidate-preview {
+    margin-top: 1rem;
+    display: grid;
+    gap: 0.55rem;
+}
+
+.candidate-preview[hidden] {
+    display: none;
+}
+
+.candidate-preview h3 {
+    margin: 0;
+    font-size: 0.82rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.candidate-preview__list {
+    display: grid;
+    gap: 0.45rem;
+}
+
+.candidate-row {
+    display: grid;
+    gap: 0.4rem;
+    padding: 0.58rem 0.65rem;
+    border-left: 2px solid rgba(99, 209, 255, 0.58);
+    background: rgba(7, 13, 20, 0.28);
+}
+
+.candidate-row__main {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    font-weight: 700;
+}
+
+.candidate-row__strategy {
+    color: rgba(215, 230, 245, 0.7);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+}
+
+.candidate-row__metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.35rem;
+    color: rgba(215, 230, 245, 0.82);
+    font-size: 0.86rem;
+}
+
+.candidate-row__metrics span {
+    white-space: nowrap;
+}
+
 .mission-heading {
     margin-top: 1.2rem;
 }

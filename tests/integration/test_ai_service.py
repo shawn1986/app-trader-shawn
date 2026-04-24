@@ -1,6 +1,8 @@
 import json
 from datetime import UTC, datetime
-from subprocess import TimeoutExpired
+from subprocess import CalledProcessError, TimeoutExpired
+
+import pytest
 
 from trader_shawn.ai.base import AiProviderError
 from trader_shawn.ai.service import AiDecisionService
@@ -65,7 +67,11 @@ def test_ai_service_returns_primary_decision_and_secondary_note() -> None:
 
     assert decision.action == "approve"
     assert decision.secondary_payload["reason"] == "too concentrated"
-    assert primary.prompts == secondary.prompts == [json.dumps(context, sort_keys=True)]
+    assert primary.prompts == secondary.prompts
+    assert "Return exactly one JSON object" in primary.prompts[0]
+    assert '"action": "approve"' in primary.prompts[0]
+    assert '"action": "reject"' in primary.prompts[0]
+    assert json.dumps(context, sort_keys=True) in primary.prompts[0]
 
 
 def test_ai_service_preserves_secondary_failure_metadata() -> None:
@@ -137,6 +143,30 @@ def test_ai_service_preserves_secondary_runtime_failure_provider_identity() -> N
     }
 
 
+def test_ai_service_normalizes_primary_runtime_failure_provider_identity() -> None:
+    primary = NamedFailingProvider(
+        "claude",
+        CalledProcessError(
+            1,
+            ["claude", "-p"],
+            output="",
+            stderr="authentication failed",
+        ),
+    )
+    service = AiDecisionService(primary=primary)
+
+    with pytest.raises(AiProviderError) as exc_info:
+        service.decide({"ticker": "AMD", "candidates": []})
+
+    assert exc_info.value.to_payload() == {
+        "provider": "claude",
+        "failure_type": "AiProviderError",
+        "reason": "provider command failed with exit code 1",
+        "stdout": "",
+        "stderr": "authentication failed",
+    }
+
+
 def test_ai_service_serializes_nested_domain_context_objects() -> None:
     primary = StubProvider(
         {
@@ -202,7 +232,7 @@ def test_ai_service_serializes_nested_domain_context_objects() -> None:
     }
 
     decision = service.decide(context)
-    prompt_payload = json.loads(primary.prompts[0])
+    prompt_payload = json.loads(primary.prompts[0].split("Context JSON:\n", 1)[1])
 
     assert decision.action == "approve"
     assert prompt_payload == {

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 from trader_shawn.candidate_builder.credit_spread_builder import (
-    MAX_BID_ASK_RATIO,
-    MAX_WIDTH,
-    MAX_ABS_DELTA,
-    MIN_ABS_DELTA,
-    MIN_OPEN_INTEREST,
-    MIN_VOLUME,
+    CandidateFilterSettings,
+    DEFAULT_FILTERS,
+    _coerce_filter_settings,
 )
 from trader_shawn.domain.models import OptionQuote, PaperWatchlistEntry
 from trader_shawn.events.earnings_calendar import EarningsCalendar
@@ -21,8 +19,10 @@ def build_paper_watchlist(
     *,
     earnings_calendar: EarningsCalendar | None = None,
     as_of: date | str | None = None,
+    filters: Any | None = None,
 ) -> list[PaperWatchlistEntry]:
     watchlist: list[PaperWatchlistEntry] = []
+    filter_settings = _coerce_filter_settings(filters)
 
     watchlist.extend(
         _build_watchlist_for_right(
@@ -34,6 +34,7 @@ def build_paper_watchlist(
             short_leg_order="desc",
             earnings_calendar=earnings_calendar,
             as_of=as_of,
+            filters=filter_settings,
         )
     )
     watchlist.extend(
@@ -46,6 +47,7 @@ def build_paper_watchlist(
             short_leg_order="asc",
             earnings_calendar=earnings_calendar,
             as_of=as_of,
+            filters=filter_settings,
         )
     )
 
@@ -65,6 +67,7 @@ def _build_watchlist_for_right(
     short_leg_order: str,
     earnings_calendar: EarningsCalendar | None,
     as_of: date | str | None,
+    filters: CandidateFilterSettings,
 ) -> list[PaperWatchlistEntry]:
     same_side = sorted(
         (
@@ -100,7 +103,7 @@ def _build_watchlist_for_right(
             key=lambda quote: abs(short_leg.strike - quote.strike),
         ):
             width = abs(short_leg.strike - long_leg.strike)
-            if width <= 0 or width > MAX_WIDTH:
+            if width <= 0 or width > filters.max_width:
                 continue
             if right == "P" and short_leg.strike <= long_leg.strike:
                 continue
@@ -117,7 +120,12 @@ def _build_watchlist_for_right(
                     long_strike=float(long_leg.strike),
                     width=float(width),
                     short_delta=short_leg.delta,
-                    flags=_observation_flags(short_leg, long_leg, event_blocked=event_blocked),
+                    flags=_observation_flags(
+                        short_leg,
+                        long_leg,
+                        event_blocked=event_blocked,
+                        filters=filters,
+                    ),
                 )
             )
     return watchlist
@@ -128,18 +136,19 @@ def _observation_flags(
     long_leg: OptionQuote,
     *,
     event_blocked: bool,
+    filters: CandidateFilterSettings = DEFAULT_FILTERS,
 ) -> list[str]:
     flags: list[str] = []
 
     if short_leg.delta is None:
         flags.append("missing_delta")
-    elif not MIN_ABS_DELTA <= abs(short_leg.delta) <= MAX_ABS_DELTA:
+    elif not filters.min_abs_delta <= abs(short_leg.delta) <= filters.max_abs_delta:
         flags.append("short_delta_out_of_range")
 
-    if short_leg.open_interest < MIN_OPEN_INTEREST or long_leg.open_interest < MIN_OPEN_INTEREST:
+    if short_leg.open_interest < filters.min_open_interest or long_leg.open_interest < filters.min_open_interest:
         flags.append("low_open_interest")
 
-    if short_leg.volume < MIN_VOLUME or long_leg.volume < MIN_VOLUME:
+    if short_leg.volume < filters.min_volume or long_leg.volume < filters.min_volume:
         flags.append("low_volume")
 
     short_mid = (short_leg.bid + short_leg.ask) / 2
@@ -152,7 +161,7 @@ def _observation_flags(
             flags.append("non_positive_credit")
         else:
             bid_ask_ratio = ((short_leg.ask - short_leg.bid) + (long_leg.ask - long_leg.bid)) / credit
-            if bid_ask_ratio > MAX_BID_ASK_RATIO:
+            if bid_ask_ratio > filters.max_bid_ask_ratio:
                 flags.append("wide_market")
 
     if event_blocked:

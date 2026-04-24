@@ -95,6 +95,39 @@ def test_load_settings_accepts_delayed_market_data_for_paper_mode(tmp_path: Path
     assert settings.market_data_type == "delayed"
 
 
+def test_load_settings_accepts_scan_filter_overrides(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    write_config(
+        config_dir,
+        app=(
+            "mode: paper\n"
+            "live_enabled: false\n"
+            "market_data_type: delayed\n"
+            "ibkr:\n"
+            "  host: 127.0.0.1\n"
+            "  port: 4002\n"
+            "  client_id: 7\n"
+            "scan_filters:\n"
+            "  min_open_interest: 0\n"
+            "  min_volume: 0\n"
+            "  min_abs_delta: 0.10\n"
+            "  max_abs_delta: 0.35\n"
+            "  max_width: 5\n"
+            "  max_bid_ask_ratio: 2.50\n"
+            "audit_db_path: runtime/audit.db\n"
+        ),
+    )
+
+    settings = load_settings(config_dir)
+
+    assert settings.scan_filters.min_open_interest == 0
+    assert settings.scan_filters.min_volume == 0
+    assert settings.scan_filters.min_abs_delta == 0.10
+    assert settings.scan_filters.max_abs_delta == 0.35
+    assert settings.scan_filters.max_bid_ask_ratio == 2.50
+
+
 def test_load_settings_rejects_delayed_market_data_for_live_mode(tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir()

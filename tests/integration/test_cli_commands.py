@@ -10,7 +10,10 @@ from click.testing import CliRunner
 import trader_shawn.app as app_module
 from trader_shawn.app import cli
 from trader_shawn.app import CliScanner
+from trader_shawn.candidate_builder.credit_spread_builder import CandidateFilterSettings
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread
+from trader_shawn.domain.models import OptionQuote
+from trader_shawn.events.earnings_calendar import EarningsCalendar
 from trader_shawn.monitoring.audit_logger import AuditLogger
 
 
@@ -559,6 +562,66 @@ def test_cli_scanner_continues_after_symbol_quote_failure() -> None:
         and event["current"] == 1
         for event in events
     )
+
+
+def test_cli_scanner_uses_configured_candidate_filters() -> None:
+    class SparseMarketDataClient:
+        market_data_type = "delayed"
+
+        def fetch_option_quotes(self, symbol: str, *, progress_callback=None) -> list[OptionQuote]:
+            _ = progress_callback
+            return [
+                OptionQuote(
+                    symbol=symbol,
+                    expiry="2026-05-08",
+                    strike=295,
+                    right="P",
+                    bid=1.00,
+                    ask=1.30,
+                    delta=-0.126,
+                    open_interest=0,
+                    volume=0,
+                ),
+                OptionQuote(
+                    symbol=symbol,
+                    expiry="2026-05-08",
+                    strike=290,
+                    right="P",
+                    bid=0.70,
+                    ask=0.90,
+                    delta=-0.08,
+                    open_interest=0,
+                    volume=0,
+                ),
+            ]
+
+    scanner = CliScanner(
+        market_data_client=SparseMarketDataClient(),
+        earnings_calendar=EarningsCalendar([]),
+        mode="paper",
+        candidate_filters=CandidateFilterSettings(
+            min_open_interest=0,
+            min_volume=0,
+            min_abs_delta=0.10,
+            max_abs_delta=0.35,
+            max_width=5,
+            max_bid_ask_ratio=2.50,
+        ),
+    )
+
+    result = scanner.scan_market(["AMD"])
+
+    assert len(result.candidates) == 1
+    assert result.candidates[0].short_strike == 295
+    assert result.symbol_summaries == [
+        {
+            "symbol": "AMD",
+            "quotes_count": 2,
+            "candidate_count": 1,
+            "watchlist_count": 0,
+            "status": "ok",
+        }
+    ]
 
 
 def test_scan_command_preserves_legacy_scan_market_list_results(monkeypatch) -> None:

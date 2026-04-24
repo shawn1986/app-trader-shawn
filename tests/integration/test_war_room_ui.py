@@ -535,6 +535,308 @@ def test_war_room_enables_trade_only_after_approved_decision() -> None:
         thread.join(timeout=5)
 
 
+def test_war_room_shows_candidate_preview_after_scan_finds_candidates() -> None:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    host, port = sock.getsockname()
+    sock.close()
+
+    def snapshot_provider() -> dict[str, object]:
+        return {
+            "generated_at": "2026-04-21T01:02:00+00:00",
+            "threat_level": "nominal",
+            "command_status": {"broker": {"state": "ok"}},
+            "risk_deck": {"open_risk": 1200.0},
+            "hot_positions": [],
+            "mission_log": [],
+            "threat_rail": {"level": "nominal"},
+        }
+
+    def command_runner(command: str, payload=None, *, progress_callback=None) -> dict[str, object]:
+        _ = payload
+        _ = progress_callback
+        assert command == "scan"
+        return {
+            "status": "ok",
+            "command": "scan",
+            "candidate_count": 5,
+            "watchlist_count": 4,
+            "candidates": [
+                {
+                    "ticker": "AMD",
+                    "strategy": "bull_put_credit_spread",
+                    "expiry": "2026-05-08",
+                    "dte": 13,
+                    "short_strike": 295.0,
+                    "long_strike": 290.0,
+                    "credit": 0.75,
+                    "max_loss": 4.25,
+                    "short_delta": 0.1218,
+                    "pop": 0.8782,
+                    "bid_ask_ratio": 0.6667,
+                    "width": 5.0,
+                },
+                {
+                    "ticker": "AMD",
+                    "strategy": "bull_put_credit_spread",
+                    "expiry": "2026-05-08",
+                    "dte": 13,
+                    "short_strike": 292.5,
+                    "long_strike": 287.5,
+                    "credit": 0.61,
+                    "max_loss": 4.39,
+                    "short_delta": 0.1131,
+                    "pop": 0.8869,
+                    "bid_ask_ratio": 0.6885,
+                    "width": 5.0,
+                },
+            ],
+            "symbol_summaries": [
+                {
+                    "symbol": "AMD",
+                    "quotes_count": 8,
+                    "candidate_count": 5,
+                    "watchlist_count": 0,
+                }
+            ],
+        }
+
+    app = create_war_room_app(snapshot_provider=snapshot_provider, command_runner=command_runner)
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://{host}:{port}"
+
+    ready = False
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(f"{base_url}/war-room", timeout=0.2) as response:
+                if response.status == 200:
+                    ready = True
+                    break
+        except URLError:
+            time.sleep(0.05)
+
+    if not ready:
+        server.should_exit = True
+        thread.join(timeout=5)
+        pytest.fail("live_server did not become ready within 5 seconds")
+
+    try:
+        with sync_playwright() as p:
+            browser = _launch_chromium_or_skip(p)
+            page = browser.new_page()
+            page.goto(f"{base_url}/war-room")
+            page.fill("[data-arm-input]", "ARM")
+            page.click("[data-arm-submit]")
+            page.wait_for_selector('[data-command="scan"]:not([disabled])')
+
+            page.click('[data-command="scan"]')
+            page.wait_for_function(
+                "() => document.querySelector('[data-command-overlay]')?.hidden === true"
+            )
+            page.wait_for_selector("[data-candidate-preview]:not([hidden])")
+            page.wait_for_function(
+                "() => document.querySelector('[data-candidate-preview]')?.textContent.includes('AMD')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-candidate-preview]')?.textContent.includes('295 / 290')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-candidate-preview]')?.textContent.includes('Credit 0.75')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-candidate-preview]')?.textContent.includes('Max loss 4.25')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-candidate-preview]')?.textContent.includes('Delta 0.12')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-candidate-preview]')?.textContent.includes('POP 88%')"
+            )
+            page.wait_for_selector('[data-command="trade"][disabled]')
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def test_war_room_surfaces_decide_provider_failure_detail() -> None:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    host, port = sock.getsockname()
+    sock.close()
+
+    def snapshot_provider() -> dict[str, object]:
+        return {
+            "generated_at": "2026-04-21T01:02:00+00:00",
+            "threat_level": "nominal",
+            "command_status": {"broker": {"state": "ok"}},
+            "risk_deck": {"open_risk": 1200.0},
+            "hot_positions": [],
+            "mission_log": [],
+            "threat_rail": {"level": "nominal"},
+        }
+
+    def command_runner(command: str, payload=None, *, progress_callback=None) -> dict[str, object]:
+        _ = payload
+        _ = progress_callback
+        assert command == "decide"
+        return {
+            "status": "decision_error",
+            "command": "decide",
+            "reason": "decision_service_failed",
+            "error_type": "AiProviderError",
+            "message": "claude: provider command failed with exit code 1",
+        }
+
+    app = create_war_room_app(snapshot_provider=snapshot_provider, command_runner=command_runner)
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://{host}:{port}"
+
+    ready = False
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(f"{base_url}/war-room", timeout=0.2) as response:
+                if response.status == 200:
+                    ready = True
+                    break
+        except URLError:
+            time.sleep(0.05)
+
+    if not ready:
+        server.should_exit = True
+        thread.join(timeout=5)
+        pytest.fail("live_server did not become ready within 5 seconds")
+
+    try:
+        with sync_playwright() as p:
+            browser = _launch_chromium_or_skip(p)
+            page = browser.new_page()
+            page.goto(f"{base_url}/war-room")
+            page.fill("[data-arm-input]", "ARM")
+            page.click("[data-arm-submit]")
+            page.wait_for_selector('[data-command="decide"]:not([disabled])')
+
+            page.click('[data-command="decide"]')
+            page.wait_for_function(
+                "() => document.querySelector('[data-command-overlay]')?.hidden === true"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-command-copy]')?.textContent.includes('claude: provider command failed with exit code 1')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-threat-copy]')?.textContent.includes('AiProviderError')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.textContent.includes('decision_service_failed')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.textContent.includes('claude: provider command failed with exit code 1')"
+            )
+            page.wait_for_selector("[data-next-actions]:not([hidden])")
+            page.wait_for_function(
+                "() => document.querySelector('[data-next-actions]')?.textContent.includes('Decision provider failed')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-next-actions]')?.textContent.includes('Check the Claude CLI session')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-next-actions]')?.textContent.includes('Increase provider_timeout_seconds')"
+            )
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def test_war_room_surfaces_decide_rejection_reason() -> None:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    host, port = sock.getsockname()
+    sock.close()
+
+    def snapshot_provider() -> dict[str, object]:
+        return {
+            "generated_at": "2026-04-21T01:02:00+00:00",
+            "threat_level": "nominal",
+            "command_status": {"broker": {"state": "ok"}},
+            "risk_deck": {"open_risk": 1200.0},
+            "hot_positions": [],
+            "mission_log": [],
+            "threat_rail": {"level": "nominal"},
+        }
+
+    def command_runner(command: str, payload=None, *, progress_callback=None) -> dict[str, object]:
+        _ = payload
+        _ = progress_callback
+        assert command == "decide"
+        return {
+            "status": "ok",
+            "command": "decide",
+            "candidate_count": 5,
+            "decision": {
+                "action": "reject",
+                "reason": "Bid-ask spread too wide and zero open interest.",
+            },
+        }
+
+    app = create_war_room_app(snapshot_provider=snapshot_provider, command_runner=command_runner)
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://{host}:{port}"
+
+    ready = False
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(f"{base_url}/war-room", timeout=0.2) as response:
+                if response.status == 200:
+                    ready = True
+                    break
+        except URLError:
+            time.sleep(0.05)
+
+    if not ready:
+        server.should_exit = True
+        thread.join(timeout=5)
+        pytest.fail("live_server did not become ready within 5 seconds")
+
+    try:
+        with sync_playwright() as p:
+            browser = _launch_chromium_or_skip(p)
+            page = browser.new_page()
+            page.goto(f"{base_url}/war-room")
+            page.fill("[data-arm-input]", "ARM")
+            page.click("[data-arm-submit]")
+            page.wait_for_selector('[data-command="decide"]:not([disabled])')
+
+            page.click('[data-command="decide"]')
+            page.wait_for_function(
+                "() => document.querySelector('[data-command-overlay]')?.hidden === true"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.textContent.includes('DECIDE reject')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-command-copy]')?.textContent.includes('Bid-ask spread too wide')"
+            )
+            page.wait_for_selector('[data-command="trade"][disabled]')
+            page.wait_for_selector("[data-next-actions]:not([hidden])")
+            page.wait_for_function(
+                "() => document.querySelector('[data-next-actions]')?.textContent.includes('Decision rejected')"
+            )
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
 def test_war_room_attaches_overlay_to_existing_running_command_after_conflict() -> None:
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))

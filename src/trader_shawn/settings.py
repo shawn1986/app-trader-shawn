@@ -8,11 +8,15 @@ import yaml
 from pydantic import BaseModel, Field, TypeAdapter, model_validator
 from pydantic_core import PydanticCustomError
 
+from trader_shawn.candidate_builder.credit_spread_builder import DEFAULT_FILTERS
+
 
 Percent = Annotated[float, Field(gt=0, le=1)]
 PositiveInt = Annotated[int, Field(gt=0)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
 PositiveFloat = Annotated[float, Field(gt=0)]
+NonNegativeFloat = Annotated[float, Field(ge=0)]
+DeltaBound = Annotated[float, Field(ge=0, le=1)]
 YamlMapping = TypeAdapter(dict[str, Any])
 
 
@@ -32,6 +36,28 @@ class RiskSettings(BaseModel):
     profit_take_pct: Percent
     stop_loss_multiple: PositiveFloat
     exit_dte_threshold: NonNegativeInt
+
+
+class ScanFilterSettings(BaseModel):
+    min_open_interest: NonNegativeInt = DEFAULT_FILTERS.min_open_interest
+    min_volume: NonNegativeInt = DEFAULT_FILTERS.min_volume
+    min_abs_delta: DeltaBound = DEFAULT_FILTERS.min_abs_delta
+    max_abs_delta: DeltaBound = DEFAULT_FILTERS.max_abs_delta
+    max_width: PositiveFloat = DEFAULT_FILTERS.max_width
+    max_bid_ask_ratio: NonNegativeFloat = DEFAULT_FILTERS.max_bid_ask_ratio
+
+    @model_validator(mode="after")
+    def validate_delta_range(self) -> "ScanFilterSettings":
+        if self.min_abs_delta > self.max_abs_delta:
+            raise PydanticCustomError(
+                "invalid_scan_delta_range",
+                "min_abs_delta must be less than or equal to max_abs_delta",
+                {
+                    "min_abs_delta": self.min_abs_delta,
+                    "max_abs_delta": self.max_abs_delta,
+                },
+            )
+        return self
 
 
 class ProviderSettings(BaseModel):
@@ -55,6 +81,7 @@ class AppConfigSettings(BaseModel):
     live_enabled: bool
     market_data_type: Literal["live", "delayed"] = "live"
     ibkr: IBKRSettings
+    scan_filters: ScanFilterSettings = Field(default_factory=ScanFilterSettings)
     audit_db_path: Path
 
     @model_validator(mode="after")
