@@ -49,7 +49,11 @@ function setPrimaryWorkflow(command, label, tip) {
 function syncCommandAvailability() {
     const primaryButton = document.querySelector("[data-primary-command]");
     if (primaryButton) {
-        primaryButton.disabled = !isArmed || busyCommand !== null || primaryCommand === null;
+        const lockedPrimaryAllowed = primaryCommand === "unlock";
+        primaryButton.disabled =
+            busyCommand !== null ||
+            primaryCommand === null ||
+            (!isArmed && !lockedPrimaryAllowed);
         primaryButton.dataset.busy = busyCommand === primaryCommand ? "true" : "false";
     }
 
@@ -70,7 +74,7 @@ function syncCommandAvailability() {
 
     const tradeConfirm = document.querySelector("[data-trade-confirm-submit]");
     if (tradeConfirm) {
-        tradeConfirm.disabled = busyCommand !== null;
+        tradeConfirm.disabled = busyCommand !== null || pendingTrade === null;
     }
 }
 
@@ -468,7 +472,7 @@ function renderPersistentResultSummary(result) {
 function setArmedMode(armed) {
     isArmed = armed;
     document.body.dataset.mode = armed ? "armed" : "monitoring";
-    if (armed && primaryCommand === null) {
+    if (armed && (primaryCommand === null || primaryCommand === "unlock")) {
         setPrimaryWorkflow(
             "scan",
             "Run Scan",
@@ -477,7 +481,11 @@ function setArmedMode(armed) {
         return;
     }
     if (!armed) {
-        setPrimaryWorkflow(null, "Unlock to start", "Unlock the War Room to begin with Scan.");
+        setPrimaryWorkflow(
+            "unlock",
+            "Unlock War Room",
+            "Type ARM above, then unlock to start Scan.",
+        );
         return;
     }
     syncCommandAvailability();
@@ -793,6 +801,15 @@ async function armWarRoom() {
     if (!armInput) {
         return;
     }
+    if (!String(armInput.value || "").trim()) {
+        armInput.focus();
+        setPrimaryWorkflow(
+            "unlock",
+            "Unlock War Room",
+            "Type ARM in the authorization phrase field, then unlock.",
+        );
+        return;
+    }
 
     const response = await fetch("/api/war-room/arm", {
         method: "POST",
@@ -859,6 +876,13 @@ async function runCommand(commandName) {
 
 async function confirmTrade() {
     if (!pendingTrade) {
+        hideTradeConfirm();
+        syncCommandAvailability();
+        prependMissionResult({
+            command: "trade",
+            status: "blocked",
+            reason: "No trade is staged. Run Scan, then Decide, before confirming a trade.",
+        });
         return;
     }
 
@@ -911,6 +935,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 return;
             }
             const command = primaryCommand;
+            if (command === "unlock") {
+                armWarRoom().catch(() => prependMissionResult({command: "arm", status: "failed"}));
+                return;
+            }
             runCommand(command).catch(() =>
                 prependMissionResult({command, status: "failed"}),
             );

@@ -147,6 +147,8 @@ def test_war_room_static_assets_are_available() -> None:
     assert js_response.status_code == 200
     assert "scrollbar-width: thin;" in css_response.text
     assert ".command-overlay__event-log::-webkit-scrollbar-button" in css_response.text
+    assert "[hidden]" in css_response.text
+    assert "display: none !important;" in css_response.text
 
 
 def test_war_room_static_asset_throttles_command_status_and_busy_snapshot_polling() -> None:
@@ -162,6 +164,35 @@ def test_war_room_static_asset_throttles_command_status_and_busy_snapshot_pollin
     assert "if (activeCommandJobId !== null) {" in source
 
 
+def test_war_room_primary_cta_unlocks_before_scan(live_server) -> None:
+    with sync_playwright() as p:
+        browser = _launch_chromium_or_skip(p)
+        page = browser.new_page()
+        page.goto(f"{live_server}/war-room")
+
+        page.wait_for_function(
+            "() => document.querySelector('[data-primary-command]')?.textContent.includes('Unlock War Room')"
+        )
+        page.wait_for_selector("[data-primary-command]:not([disabled])")
+
+        page.click("[data-primary-command]")
+        page.wait_for_function(
+            "() => document.activeElement === document.querySelector('[data-arm-input]')"
+        )
+        page.wait_for_function(
+            "() => document.querySelector('[data-primary-tip]')?.textContent.includes('Type ARM in the authorization phrase field')"
+        )
+
+        page.fill("[data-arm-input]", "ARM")
+        page.click("[data-primary-command]")
+        page.wait_for_function("() => document.body.dataset.mode === 'armed'")
+        page.wait_for_function(
+            "() => document.querySelector('[data-primary-command]')?.textContent.includes('Run Scan')"
+        )
+
+        browser.close()
+
+
 def test_war_room_unlocks_controls_and_refreshes_threat_level(live_server) -> None:
     with sync_playwright() as p:
         browser = _launch_chromium_or_skip(p)
@@ -169,6 +200,9 @@ def test_war_room_unlocks_controls_and_refreshes_threat_level(live_server) -> No
         page.goto(f"{live_server}/war-room")
         page.wait_for_function(
             "() => document.querySelector('[data-threat-level]')?.textContent.trim() === 'Warning'"
+        )
+        page.wait_for_function(
+            "() => getComputedStyle(document.querySelector('[data-trade-confirm]')).display === 'none'"
         )
 
         page.fill("[data-arm-input]", "ARM")
@@ -182,7 +216,9 @@ def test_war_room_unlocks_controls_and_refreshes_threat_level(live_server) -> No
         page.wait_for_function(
             "() => document.querySelector('[data-threat-level]')?.textContent.trim() === 'Critical'"
         )
-        page.wait_for_selector("[data-trade-confirm][hidden]")
+        page.wait_for_function(
+            "() => document.querySelector('[data-trade-confirm]')?.hidden === true"
+        )
 
         browser.close()
 
@@ -207,7 +243,9 @@ def test_war_room_relocks_after_armed_session_expires(live_server) -> None:
 
         page.wait_for_function("() => document.body.dataset.mode === 'monitoring'")
         page.wait_for_selector('[data-secondary-command="manage"][disabled]')
-        page.wait_for_selector("[data-trade-confirm][hidden]")
+        page.wait_for_function(
+            "() => document.querySelector('[data-trade-confirm]')?.hidden === true"
+        )
         page.wait_for_function(
             "() => document.querySelector('[data-mission-log] li')?.textContent.includes('armed_mode_required')"
         )
@@ -429,7 +467,9 @@ def test_war_room_surfaces_successful_scan_counts_after_overlay_closes() -> None
             page.wait_for_function(
                 "() => document.querySelector('[data-command-overlay]')?.hidden === true"
             )
-            page.wait_for_selector("[data-trade-confirm][hidden]")
+            page.wait_for_function(
+                "() => document.querySelector('[data-trade-confirm]')?.hidden === true"
+            )
             page.wait_for_function(
                 "() => !document.querySelector('[data-primary-command]')?.textContent.includes('Stage Trade')"
             )
