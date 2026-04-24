@@ -3,6 +3,7 @@ import asyncio
 import threading
 import time
 from types import SimpleNamespace
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi.testclient import TestClient
 
@@ -765,3 +766,42 @@ def test_shared_default_runtime_serializes_provider_and_runner_use(monkeypatch) 
     assert not errors
     assert len(outputs) == 2
     assert command_entered.is_set()
+
+
+def test_shared_default_runtime_uses_one_worker_thread_for_provider_and_runner(monkeypatch) -> None:
+    shared_runtime = object()
+    worker_thread_ids: list[int] = []
+
+    def _runtime_builder():
+        worker_thread_ids.append(threading.get_ident())
+        return shared_runtime
+
+    def _provider_factory(*, runtime=None):
+        assert runtime is shared_runtime
+
+        def _provider():
+            worker_thread_ids.append(threading.get_ident())
+            time.sleep(0.1)
+            return {"status": "ok", "source": "snapshot"}
+
+        return _provider
+
+    def _runtime_runner(command, payload=None, *, runtime=None):
+        _ = payload
+        assert command == "scan"
+        assert runtime is shared_runtime
+        worker_thread_ids.append(threading.get_ident())
+        return {"status": "ok", "source": "command"}
+
+    monkeypatch.setattr("trader_shawn.war_room.web.build_cli_runtime", _runtime_builder)
+    monkeypatch.setattr("trader_shawn.war_room.web.create_default_snapshot_provider", _provider_factory)
+    monkeypatch.setattr("trader_shawn.war_room.web.run_runtime_command", _runtime_runner)
+
+    provider, runner = web_module._lazy_shared_default_provider_and_runner()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        provider_future = executor.submit(provider)
+        runner_future = executor.submit(runner, "scan", {})
+
+    assert provider_future.result()["status"] == "ok"
+    assert runner_future.result()["status"] == "ok"
+    assert len(set(worker_thread_ids)) == 1

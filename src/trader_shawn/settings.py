@@ -20,6 +20,7 @@ class IBKRSettings(BaseModel):
     host: str
     port: int
     client_id: int
+    request_timeout_seconds: PositiveInt = 30
 
 
 class RiskSettings(BaseModel):
@@ -137,6 +138,12 @@ def load_settings(config_dir: Path) -> AppSettings:
         ibkr_data["client_id"] = _parse_int_env(
             "TRADER_SHAWN_IBKR_CLIENT_ID", ibkr_data.get("client_id")
         )
+        request_timeout_seconds = _parse_int_env(
+            "TRADER_SHAWN_IBKR_REQUEST_TIMEOUT_SECONDS",
+            ibkr_data.get("request_timeout_seconds"),
+        )
+        if request_timeout_seconds is not None:
+            ibkr_data["request_timeout_seconds"] = request_timeout_seconds
     app_data["ibkr"] = ibkr_data
 
     app_settings = AppConfigSettings.model_validate(app_data)

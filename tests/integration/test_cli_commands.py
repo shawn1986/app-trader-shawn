@@ -9,6 +9,7 @@ from click.testing import CliRunner
 
 import trader_shawn.app as app_module
 from trader_shawn.app import cli
+from trader_shawn.app import CliScanner
 from trader_shawn.domain.models import AccountSnapshot, CandidateSpread
 from trader_shawn.monitoring.audit_logger import AuditLogger
 
@@ -436,6 +437,128 @@ def test_scan_command_includes_watchlist_for_paper_market_observations(monkeypat
         }
     ]
     assert scanner.calls == [["SPY", "QQQ", "AMD"]]
+
+
+def test_scan_command_includes_symbol_summaries_from_market_scan(monkeypatch) -> None:
+    runner = CliRunner()
+    scanner = FakeMarketScanner(
+        [],
+        [],
+    )
+    scanner.symbol_summaries = [
+        {
+            "symbol": "AMD",
+            "quotes_count": 8,
+            "candidate_count": 0,
+            "watchlist_count": 0,
+        }
+    ]
+
+    def scan_market(symbols: list[str]) -> object:
+        scanner.calls.append(list(symbols))
+        return SimpleNamespace(
+            candidates=[],
+            watchlist=[],
+            symbol_summaries=list(scanner.symbol_summaries),
+        )
+
+    scanner.scan_market = scan_market
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(scanner=scanner),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["scan"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["candidate_count"] == 0
+    assert payload["symbol_summaries"] == [
+        {
+            "symbol": "AMD",
+            "quotes_count": 8,
+            "candidate_count": 0,
+            "watchlist_count": 0,
+        }
+    ]
+
+
+def test_cli_scanner_forwards_market_data_progress_events() -> None:
+    events: list[dict[str, object]] = []
+
+    class ProgressMarketDataClient:
+        market_data_type = "delayed"
+
+        def fetch_option_quotes(self, symbol: str, *, progress_callback=None) -> list[object]:
+            if callable(progress_callback):
+                progress_callback(
+                    {
+                        "stage": "ibkr_option_chain_fetching",
+                        "message": f"Fetching {symbol} option chain.",
+                    }
+                )
+            return []
+
+    scanner = CliScanner(
+        market_data_client=ProgressMarketDataClient(),
+        earnings_calendar=SimpleNamespace(),
+        mode="paper",
+        progress_callback=events.append,
+    )
+
+    scanner.scan_market(["SPY"])
+
+    assert any(
+        event["stage"] == "ibkr_option_chain_fetching"
+        and event["symbol"] == "SPY"
+        and event["current"] == 0
+        and event["total"] == 1
+        for event in events
+    )
+
+
+def test_cli_scanner_continues_after_symbol_quote_failure() -> None:
+    events: list[dict[str, object]] = []
+
+    class FlakyMarketDataClient:
+        market_data_type = "delayed"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def fetch_option_quotes(self, symbol: str, *, progress_callback=None) -> list[object]:
+            _ = progress_callback
+            self.calls.append(symbol)
+            if symbol == "SPY":
+                raise TimeoutError()
+            return []
+
+    market_data = FlakyMarketDataClient()
+    scanner = CliScanner(
+        market_data_client=market_data,
+        earnings_calendar=SimpleNamespace(),
+        mode="paper",
+        progress_callback=events.append,
+    )
+
+    result = scanner.scan_market(["SPY", "QQQ"])
+
+    assert market_data.calls == ["SPY", "QQQ"]
+    assert result.symbol_errors == [
+        {
+            "symbol": "SPY",
+            "error_type": "TimeoutError",
+            "message": "IBKR request timed out",
+        }
+    ]
+    assert any(
+        event["stage"] == "scan_symbol_failed"
+        and event["symbol"] == "SPY"
+        and event["current"] == 1
+        for event in events
+    )
 
 
 def test_scan_command_preserves_legacy_scan_market_list_results(monkeypatch) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, date, datetime
 from enum import Enum
+import inspect
 import json
 import math
 from pathlib import Path
@@ -49,6 +50,8 @@ class CliRuntime:
 class ScanMarketResult:
     candidates: list[CandidateSpread]
     watchlist: list[Any] = field(default_factory=list)
+    symbol_errors: list[dict[str, str]] = field(default_factory=list)
+    symbol_summaries: list[dict[str, Any]] = field(default_factory=list)
 
 
 class CliScanner:
@@ -89,6 +92,8 @@ class CliScanner:
         as_of = date.today()
         candidates: list[CandidateSpread] = []
         watchlist: list[Any] = []
+        symbol_errors: list[dict[str, str]] = []
+        symbol_summaries: list[dict[str, Any]] = []
         total_symbols = len(symbols)
         self._emit_progress(
             "scan_started",
@@ -117,7 +122,43 @@ class CliScanner:
                 f"scan: fetching {symbol} option quotes ({market_data_type} market data)",
                 err=True,
             )
-            quotes = self._market_data_client.fetch_option_quotes(symbol)
+            try:
+                quotes = self._fetch_symbol_option_quotes(
+                    symbol,
+                    current=index - 1,
+                    total=total_symbols,
+                )
+            except Exception as exc:
+                error_message = _exception_message(exc)
+                symbol_errors.append(
+                    {
+                        "symbol": symbol,
+                        "error_type": type(exc).__name__,
+                        "message": error_message,
+                    }
+                )
+                symbol_summaries.append(
+                    {
+                        "symbol": symbol,
+                        "quotes_count": 0,
+                        "candidate_count": 0,
+                        "watchlist_count": 0,
+                        "status": "failed",
+                        "error_type": type(exc).__name__,
+                        "message": error_message,
+                    }
+                )
+                self._emit_progress(
+                    "scan_symbol_failed",
+                    f"{symbol} failed: {error_message}",
+                    symbol=symbol,
+                    error_type=type(exc).__name__,
+                    current=index,
+                    total=total_symbols,
+                    unit="symbols",
+                )
+                click.echo(f"scan: {symbol} failed: {error_message}", err=True)
+                continue
             click.echo(f"scan: {symbol} returned {len(quotes)} option quotes", err=True)
             quotes_by_expiry: dict[str, list[Any]] = {}
             for quote in quotes:
@@ -161,6 +202,15 @@ class CliScanner:
                 total=total_symbols,
                 unit="symbols",
             )
+            symbol_summaries.append(
+                {
+                    "symbol": symbol,
+                    "quotes_count": len(quotes),
+                    "candidate_count": len(candidates) - symbol_candidate_count_before,
+                    "watchlist_count": len(watchlist) - symbol_watchlist_count_before,
+                    "status": "ok",
+                }
+            )
         self._emit_progress(
             "scan_completed",
             (
@@ -173,7 +223,46 @@ class CliScanner:
             total=total_symbols,
             unit="symbols",
         )
-        return ScanMarketResult(candidates=candidates, watchlist=watchlist)
+        return ScanMarketResult(
+            candidates=candidates,
+            watchlist=watchlist,
+            symbol_errors=symbol_errors,
+            symbol_summaries=symbol_summaries,
+        )
+
+    def _fetch_symbol_option_quotes(
+        self,
+        symbol: str,
+        *,
+        current: int,
+        total: int,
+    ) -> list[Any]:
+        fetch_option_quotes = self._market_data_client.fetch_option_quotes
+
+        def progress_callback(event: dict[str, Any]) -> None:
+            payload = dict(event)
+            payload.setdefault("symbol", symbol)
+            payload.setdefault("current", current)
+            payload.setdefault("total", total)
+            payload.setdefault("unit", "symbols")
+            if "stage" not in payload:
+                payload["stage"] = "scan_symbol_progress"
+            if "message" not in payload:
+                payload["message"] = f"{symbol} scan step in progress."
+            self._emit_progress(
+                str(payload.pop("stage")),
+                str(payload.pop("message")),
+                **payload,
+            )
+
+        if _callable_accepts_keyword(fetch_option_quotes, "progress_callback"):
+            return list(
+                fetch_option_quotes(
+                    symbol,
+                    progress_callback=progress_callback,
+                )
+            )
+        return list(fetch_option_quotes(symbol))
 
 
 def run_trade_cycle(
@@ -402,8 +491,17 @@ def _error_result(*, status: str, reason: str, exc: Exception) -> dict[str, str]
         "status": status,
         "reason": reason,
         "error_type": type(exc).__name__,
-        "message": str(exc),
+        "message": _exception_message(exc),
     }
+
+
+def _exception_message(exc: Exception) -> str:
+    message = str(exc)
+    if message:
+        return message
+    if isinstance(exc, TimeoutError):
+        return "IBKR request timed out"
+    return type(exc).__name__
 
 
 def build_cli_runtime() -> CliRuntime:
@@ -416,6 +514,7 @@ def build_cli_runtime() -> CliRuntime:
         port=settings.ibkr.port,
         client_id=market_data_client_id,
         market_data_type=settings.market_data_type,
+        request_timeout_seconds=getattr(settings.ibkr, "request_timeout_seconds", 30),
     )
     earnings_calendar = EarningsCalendar(settings.events)
     executor = IbkrExecutor(
@@ -517,6 +616,11 @@ def _scan_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
     if runtime.settings.mode == "paper" and scan_result.watchlist:
         response["watchlist_count"] = len(scan_result.watchlist)
         response["watchlist"] = _json_safe(scan_result.watchlist)
+    if scan_result.symbol_errors:
+        response["symbol_error_count"] = len(scan_result.symbol_errors)
+        response["symbol_errors"] = _json_safe(scan_result.symbol_errors)
+    if scan_result.symbol_summaries:
+        response["symbol_summaries"] = _json_safe(scan_result.symbol_summaries)
     return response
 
 
@@ -911,6 +1015,8 @@ def _coerce_scan_market_result(result: Any) -> ScanMarketResult:
         return ScanMarketResult(
             candidates=list(result.candidates),
             watchlist=list(result.watchlist),
+            symbol_errors=list(result.symbol_errors),
+            symbol_summaries=list(result.symbol_summaries),
         )
 
     if isinstance(result, Sequence) and not isinstance(
@@ -922,6 +1028,8 @@ def _coerce_scan_market_result(result: Any) -> ScanMarketResult:
     return ScanMarketResult(
         candidates=list(getattr(result, "candidates", [])),
         watchlist=list(getattr(result, "watchlist", [])),
+        symbol_errors=list(getattr(result, "symbol_errors", [])),
+        symbol_summaries=list(getattr(result, "symbol_summaries", [])),
     )
 
 
@@ -1456,6 +1564,19 @@ def _json_safe(value: Any) -> Any:
     if public_attrs:
         return public_attrs
     return value
+
+
+def _callable_accepts_keyword(func: Callable[..., Any], name: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == name:
+            return True
+    return False
 
 
 if __name__ == "__main__":

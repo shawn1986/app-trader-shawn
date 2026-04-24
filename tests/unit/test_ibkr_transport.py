@@ -427,6 +427,46 @@ def test_ibkr_market_data_client_ensures_connection_before_live_requests() -> No
     assert ib_client.connect_calls == [("127.0.0.1", 7497, 17)]
 
 
+def test_ibkr_market_data_client_sets_blocking_request_timeout() -> None:
+    ib_client = FakeMarketDataClient()
+    ib_client.RequestTimeout = 0
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+        request_timeout_seconds=12,
+    )
+
+    client.ensure_connected()
+
+    assert ib_client.RequestTimeout == 12
+
+
+def test_ibkr_market_data_client_passes_connect_timeout_when_supported() -> None:
+    class TimeoutAwareClient(FakeMarketDataClient):
+        def connect(
+            self,
+            host: str,
+            port: int,
+            clientId: int,
+            *,
+            timeout: float,
+        ) -> "TimeoutAwareClient":
+            self.connected = True
+            self.connect_calls.append((host, port, clientId, timeout))
+            return self
+
+    ib_client = TimeoutAwareClient()
+    client = IbkrMarketDataClient(
+        client=ib_client,
+        ibkr_module=FakeIbModule(),
+        request_timeout_seconds=9,
+    )
+
+    client.ensure_connected()
+
+    assert ib_client.connect_calls == [("127.0.0.1", 4002, 7, 9)]
+
+
 def test_ibkr_market_data_client_defaults_to_ib_gateway_paper_port() -> None:
     ib_client = FakeMarketDataClient()
     client = IbkrMarketDataClient(
@@ -829,6 +869,29 @@ def test_ibkr_market_data_client_uses_contract_details_to_skip_invalid_combinati
         ("20260430", 100.0, "C"),
         ("20260508", 105.0, "P"),
     }
+
+
+def test_ibkr_market_data_client_does_not_swallow_contract_detail_timeout() -> None:
+    class TimeoutContractDetailsClient(FakeMarketDataClient):
+        def reqContractDetails(self, contract: object) -> list[object]:
+            _ = contract
+            raise TimeoutError("contract details timed out")
+
+    client = IbkrMarketDataClient(
+        client=TimeoutContractDetailsClient(),
+        ibkr_module=FakeIbModule(),
+        market_data_type="delayed",
+        request_timeout_seconds=1,
+    )
+
+    with pytest.raises(TimeoutError, match="contract details timed out"):
+        client.fetch_option_quotes(
+            "AMD",
+            min_dte=7,
+            max_dte=21,
+            rights=("P",),
+            as_of=date(2026, 4, 20),
+        )
 
 
 def test_ibkr_market_data_client_limits_default_expiry_scan_count() -> None:

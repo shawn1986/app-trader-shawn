@@ -156,6 +156,32 @@ body[data-busy="true"] {
 
 .mission-log li {
     color: rgba(215, 230, 245, 0.85);
+    display: grid;
+    gap: 0.18rem;
+    padding: 0.45rem 0.55rem;
+    border-left: 2px solid rgba(99, 209, 255, 0.5);
+    background: rgba(7, 13, 20, 0.24);
+}
+
+.mission-log li[data-severity="warning"] {
+    border-left-color: rgba(255, 179, 71, 0.88);
+    background: rgba(255, 179, 71, 0.08);
+}
+
+.mission-log li[data-severity="error"] {
+    border-left-color: rgba(255, 79, 94, 0.88);
+    background: rgba(255, 79, 94, 0.08);
+}
+
+.mission-log__headline {
+    font-weight: 700;
+    letter-spacing: 0.03em;
+}
+
+.mission-log__detail {
+    color: rgba(215, 230, 245, 0.74);
+    font-size: 0.88rem;
+    line-height: 1.35;
 }
 
 .command-status {
@@ -325,15 +351,42 @@ body[data-threat="critical"] .threat-rail [data-threat-level] {
     position: relative;
     margin: 1rem 0 0;
     padding-left: 1.2rem;
+    padding-right: 0.45rem;
     display: grid;
     gap: 0.45rem;
     color: rgba(215, 230, 245, 0.86);
     max-height: 10rem;
     overflow: auto;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(99, 209, 255, 0.48) rgba(8, 17, 27, 0.42);
 }
 
 .command-overlay__event-log li::marker {
     color: rgba(99, 209, 255, 0.9);
+}
+
+.command-overlay__event-log::-webkit-scrollbar {
+    width: 0.55rem;
+}
+
+.command-overlay__event-log::-webkit-scrollbar-track {
+    border-radius: 999px;
+    background: rgba(8, 17, 27, 0.42);
+}
+
+.command-overlay__event-log::-webkit-scrollbar-thumb {
+    border: 2px solid rgba(8, 17, 27, 0.82);
+    border-radius: 999px;
+    background: linear-gradient(180deg, rgba(99, 209, 255, 0.74), rgba(41, 92, 118, 0.72));
+}
+
+.command-overlay__event-log::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, rgba(129, 222, 255, 0.92), rgba(62, 124, 154, 0.86));
+}
+
+.command-overlay__event-log::-webkit-scrollbar-button {
+    display: none;
 }
 
 @keyframes overlay-spin {

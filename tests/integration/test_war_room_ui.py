@@ -141,6 +141,21 @@ def test_war_room_static_assets_are_available() -> None:
 
     assert css_response.status_code == 200
     assert js_response.status_code == 200
+    assert "scrollbar-width: thin;" in css_response.text
+    assert ".command-overlay__event-log::-webkit-scrollbar-button" in css_response.text
+
+
+def test_war_room_static_asset_throttles_command_status_and_busy_snapshot_polling() -> None:
+    client = TestClient(create_war_room_app(snapshot_provider=lambda: {}))
+
+    response = client.get("/static/war_room.js")
+
+    assert response.status_code == 200
+    source = response.text
+    assert "const COMMAND_STATUS_POLL_MS = 1500;" in source
+    assert "if (busyCommand !== null) {" in source
+    assert "return null;" in source
+    assert "if (activeCommandJobId !== null) {" in source
 
 
 def test_war_room_unlocks_controls_and_refreshes_threat_level(live_server) -> None:
@@ -237,3 +252,407 @@ def test_war_room_shows_full_overlay_while_command_is_running(live_server) -> No
         )
 
         browser.close()
+
+
+def test_war_room_surfaces_scan_symbol_errors_after_overlay_closes() -> None:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    host, port = sock.getsockname()
+    sock.close()
+
+    def snapshot_provider() -> dict[str, object]:
+        return {
+            "generated_at": "2026-04-21T01:02:00+00:00",
+            "threat_level": "warning",
+            "command_status": {"broker": {"state": "ok"}},
+            "risk_deck": {"open_risk": 1200.0},
+            "hot_positions": [],
+            "mission_log": [],
+            "threat_rail": {"level": "warning"},
+        }
+
+    def command_runner(
+        command: str,
+        payload: dict[str, object] | None = None,
+        *,
+        progress_callback=None,
+    ) -> dict[str, object]:
+        _ = payload
+        assert command == "scan"
+        if callable(progress_callback):
+            progress_callback(
+                {
+                    "stage": "scan_symbol_failed",
+                    "message": "SPY failed: IBKR request timed out",
+                    "symbol": "SPY",
+                    "current": 1,
+                    "total": 5,
+                    "unit": "symbols",
+                }
+            )
+        return {
+            "status": "ok",
+            "command": "scan",
+            "candidate_count": 0,
+            "candidates": [],
+            "symbol_error_count": 5,
+            "symbol_errors": [
+                {
+                    "symbol": "SPY",
+                    "error_type": "TimeoutError",
+                    "message": "IBKR request timed out",
+                }
+            ],
+        }
+
+    app = create_war_room_app(snapshot_provider=snapshot_provider, command_runner=command_runner)
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://{host}:{port}"
+
+    ready = False
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(f"{base_url}/war-room", timeout=0.2) as response:
+                if response.status == 200:
+                    ready = True
+                    break
+        except URLError:
+            time.sleep(0.05)
+
+    if not ready:
+        server.should_exit = True
+        thread.join(timeout=5)
+        pytest.fail("live_server did not become ready within 5 seconds")
+
+    try:
+        with sync_playwright() as p:
+            browser = _launch_chromium_or_skip(p)
+            page = browser.new_page()
+            page.goto(f"{base_url}/war-room")
+            page.fill("[data-arm-input]", "ARM")
+            page.click("[data-arm-submit]")
+            page.wait_for_selector('[data-command="scan"]:not([disabled])')
+
+            page.click('[data-command="scan"]')
+            page.wait_for_function(
+                "() => document.querySelector('[data-command-overlay]')?.hidden === true"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.dataset.severity === 'warning'"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.textContent.includes('SCAN warning')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.textContent.includes('5 symbol errors')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-command-copy]')?.textContent.includes('5 symbol errors')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-threat-copy]')?.textContent.includes('SPY: IBKR request timed out')"
+            )
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def test_war_room_surfaces_successful_scan_counts_after_overlay_closes() -> None:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    host, port = sock.getsockname()
+    sock.close()
+
+    def snapshot_provider() -> dict[str, object]:
+        return {
+            "generated_at": "2026-04-21T01:02:00+00:00",
+            "threat_level": "nominal",
+            "command_status": {"broker": {"state": "ok"}},
+            "risk_deck": {"open_risk": 1200.0},
+            "hot_positions": [],
+            "mission_log": [],
+            "threat_rail": {"level": "nominal"},
+        }
+
+    def command_runner(command: str, payload=None, *, progress_callback=None) -> dict[str, object]:
+        _ = payload
+        _ = progress_callback
+        assert command == "scan"
+        return {
+            "status": "ok",
+            "command": "scan",
+            "candidate_count": 0,
+            "candidates": [],
+            "watchlist_count": 0,
+            "symbol_summaries": [
+                {
+                    "symbol": "AMD",
+                    "quotes_count": 8,
+                    "candidate_count": 0,
+                    "watchlist_count": 0,
+                }
+            ],
+        }
+
+    app = create_war_room_app(snapshot_provider=snapshot_provider, command_runner=command_runner)
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://{host}:{port}"
+
+    ready = False
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(f"{base_url}/war-room", timeout=0.2) as response:
+                if response.status == 200:
+                    ready = True
+                    break
+        except URLError:
+            time.sleep(0.05)
+
+    if not ready:
+        server.should_exit = True
+        thread.join(timeout=5)
+        pytest.fail("live_server did not become ready within 5 seconds")
+
+    try:
+        with sync_playwright() as p:
+            browser = _launch_chromium_or_skip(p)
+            page = browser.new_page()
+            page.goto(f"{base_url}/war-room")
+            page.fill("[data-arm-input]", "ARM")
+            page.click("[data-arm-submit]")
+            page.wait_for_selector('[data-command="trade"]:not([disabled])')
+            page.click('[data-command="trade"]')
+            page.wait_for_selector("[data-trade-confirm]:not([hidden])")
+
+            page.click('[data-command="scan"]')
+            page.wait_for_function(
+                "() => document.querySelector('[data-command-overlay]')?.hidden === true"
+            )
+            page.wait_for_selector("[data-trade-confirm][hidden]")
+            page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.dataset.severity === 'ok'"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.textContent.includes('SCAN ok')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.textContent.includes('0 candidates')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.textContent.includes('AMD 8 quotes')"
+            )
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def test_war_room_attaches_overlay_to_existing_running_command_after_conflict() -> None:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    host, port = sock.getsockname()
+    sock.close()
+
+    release_scan = threading.Event()
+    scan_entered = threading.Event()
+
+    def snapshot_provider() -> dict[str, object]:
+        return {
+            "generated_at": "2026-04-21T01:02:00+00:00",
+            "threat_level": "warning",
+            "command_status": {"broker": {"state": "ok"}},
+            "risk_deck": {"open_risk": 1200.0},
+            "hot_positions": [],
+            "mission_log": [],
+            "threat_rail": {"level": "warning"},
+        }
+
+    def command_runner(
+        command: str,
+        payload: dict[str, object] | None = None,
+        *,
+        progress_callback=None,
+    ) -> dict[str, str]:
+        _ = payload
+        assert command == "scan"
+        if callable(progress_callback):
+            progress_callback(
+                {
+                    "stage": "scan_symbol_fetching",
+                    "message": "Fetching SPY option quotes.",
+                    "symbol": "SPY",
+                    "current": 0,
+                    "total": 1,
+                    "unit": "symbols",
+                }
+            )
+        scan_entered.set()
+        assert release_scan.wait(timeout=5.0)
+        return {"status": "ok", "command": command}
+
+    app = create_war_room_app(snapshot_provider=snapshot_provider, command_runner=command_runner)
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://{host}:{port}"
+
+    ready = False
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(f"{base_url}/war-room", timeout=0.2) as response:
+                if response.status == 200:
+                    ready = True
+                    break
+        except URLError:
+            time.sleep(0.05)
+
+    if not ready:
+        server.should_exit = True
+        thread.join(timeout=5)
+        pytest.fail("live_server did not become ready within 5 seconds")
+
+    try:
+        with sync_playwright() as p:
+            browser = _launch_chromium_or_skip(p)
+            context = browser.new_context()
+            first_page = context.new_page()
+            first_page.goto(f"{base_url}/war-room")
+            first_page.fill("[data-arm-input]", "ARM")
+            first_page.click("[data-arm-submit]")
+            first_page.wait_for_selector('[data-command="scan"]:not([disabled])')
+            first_page.click('[data-command="scan"]')
+            assert scan_entered.wait(timeout=3.0)
+
+            second_page = context.new_page()
+            second_page.goto(f"{base_url}/war-room")
+            second_page.fill("[data-arm-input]", "ARM")
+            second_page.click("[data-arm-submit]")
+            second_page.wait_for_selector('[data-command="scan"]:not([disabled])')
+            second_page.click('[data-command="scan"]')
+
+            second_page.wait_for_selector("[data-command-overlay]:not([hidden])")
+            second_page.wait_for_function(
+                "() => document.querySelector('[data-overlay-command]')?.textContent.includes('SCAN')"
+            )
+            second_page.wait_for_function(
+                "() => document.querySelector('[data-overlay-events]')?.textContent.includes('Fetching SPY option quotes')"
+            )
+
+            release_scan.set()
+            second_page.wait_for_function(
+                "() => document.querySelector('[data-command-overlay]')?.hidden === true"
+            )
+            second_page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.textContent.includes('SCAN ok')"
+            )
+            browser.close()
+    finally:
+        release_scan.set()
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def test_war_room_restores_overlay_when_command_is_already_running() -> None:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    host, port = sock.getsockname()
+    sock.close()
+
+    release_scan = threading.Event()
+    scan_entered = threading.Event()
+
+    def snapshot_provider() -> dict[str, object]:
+        return {
+            "generated_at": "2026-04-21T01:02:00+00:00",
+            "threat_level": "warning",
+            "command_status": {"broker": {"state": "ok"}},
+            "risk_deck": {"open_risk": 1200.0},
+            "hot_positions": [],
+            "mission_log": [],
+            "threat_rail": {"level": "warning"},
+        }
+
+    def command_runner(
+        command: str,
+        payload: dict[str, object] | None = None,
+        *,
+        progress_callback=None,
+    ) -> dict[str, str]:
+        _ = payload
+        assert command == "scan"
+        if callable(progress_callback):
+            progress_callback(
+                {
+                    "stage": "scan_symbol_fetching",
+                    "message": "Fetching SPY option quotes.",
+                    "symbol": "SPY",
+                    "current": 0,
+                    "total": 1,
+                    "unit": "symbols",
+                }
+            )
+        scan_entered.set()
+        assert release_scan.wait(timeout=5.0)
+        return {"status": "ok", "command": command}
+
+    app = create_war_room_app(snapshot_provider=snapshot_provider, command_runner=command_runner)
+    client = TestClient(app)
+    assert client.post("/api/war-room/arm", json={"phrase": "ARM"}).status_code == 204
+    assert client.post("/api/war-room/commands/scan", json={"async": True}).status_code == 202
+    assert scan_entered.wait(timeout=3.0)
+
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://{host}:{port}"
+
+    ready = False
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(f"{base_url}/war-room", timeout=0.2) as response:
+                if response.status == 200:
+                    ready = True
+                    break
+        except URLError:
+            time.sleep(0.05)
+
+    if not ready:
+        server.should_exit = True
+        thread.join(timeout=5)
+        pytest.fail("live_server did not become ready within 5 seconds")
+
+    try:
+        with sync_playwright() as p:
+            browser = _launch_chromium_or_skip(p)
+            page = browser.new_page()
+            page.goto(f"{base_url}/war-room")
+
+            page.wait_for_selector("[data-command-overlay]:not([hidden])")
+            page.wait_for_function(
+                "() => document.querySelector('[data-overlay-command]')?.textContent.includes('SCAN')"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-overlay-events]')?.textContent.includes('Fetching SPY option quotes')"
+            )
+
+            release_scan.set()
+            page.wait_for_function(
+                "() => document.querySelector('[data-command-overlay]')?.hidden === true"
+            )
+            page.wait_for_function(
+                "() => document.querySelector('[data-mission-log] li')?.textContent.includes('SCAN ok')"
+            )
+            browser.close()
+    finally:
+        release_scan.set()
+        server.should_exit = True
+        thread.join(timeout=5)

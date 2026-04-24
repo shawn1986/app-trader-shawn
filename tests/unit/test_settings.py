@@ -78,6 +78,7 @@ def test_load_settings_uses_ib_gateway_paper_default_port(tmp_path: Path) -> Non
     assert settings.ibkr.host == "127.0.0.1"
     assert settings.ibkr.port == 4002
     assert settings.ibkr.client_id == 7
+    assert settings.ibkr.request_timeout_seconds == 30
     assert settings.market_data_type == "live"
 
 
@@ -126,6 +127,18 @@ def test_load_settings_rejects_invalid_ibkr_int_env(monkeypatch, tmp_path: Path)
 
     with pytest.raises(ValueError, match="TRADER_SHAWN_IBKR_PORT"):
         load_settings(config_dir)
+
+
+def test_load_settings_accepts_ibkr_request_timeout_env(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    write_config(config_dir)
+
+    monkeypatch.setenv("TRADER_SHAWN_IBKR_REQUEST_TIMEOUT_SECONDS", "12")
+
+    settings = load_settings(config_dir)
+
+    assert settings.ibkr.request_timeout_seconds == 12
 
 
 def test_load_settings_rejects_malformed_symbols_shape(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import inspect
 from pathlib import Path
 import threading
@@ -394,7 +395,10 @@ def _lazy_shared_default_provider_and_runner() -> tuple[SnapshotProvider, Comman
     runtime: Any | None = None
     provider: SnapshotProvider | None = None
     init_lock = threading.RLock()
-    runtime_use_lock = threading.Lock()
+    runtime_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="war-room-runtime",
+    )
     provider_factory = create_default_snapshot_provider
     provider_accepts_runtime = "runtime" in inspect.signature(provider_factory).parameters
 
@@ -420,19 +424,22 @@ def _lazy_shared_default_provider_and_runner() -> tuple[SnapshotProvider, Comman
         return provider
 
     def lazy_provider() -> dict[str, Any]:
-        try:
-            resolved_provider = _ensure_provider()
-        except Exception as exc:
-            return _degraded_snapshot(
-                reason="snapshot_provider_unavailable",
-                exc=exc,
-            )
+        def _provider_task() -> dict[str, Any]:
+            _ensure_thread_event_loop()
+            try:
+                resolved_provider = _ensure_provider()
+            except Exception as exc:
+                return _degraded_snapshot(
+                    reason="snapshot_provider_unavailable",
+                    exc=exc,
+                )
 
-        try:
-            with runtime_use_lock:
+            try:
                 return resolved_provider()
-        except Exception as exc:
-            return _degraded_snapshot(reason="snapshot_provider_error", exc=exc)
+            except Exception as exc:
+                return _degraded_snapshot(reason="snapshot_provider_error", exc=exc)
+
+        return runtime_executor.submit(_provider_task).result()
 
     def lazy_runner(
         command: str,
@@ -440,21 +447,22 @@ def _lazy_shared_default_provider_and_runner() -> tuple[SnapshotProvider, Comman
         *,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        runtime_command_accepts_progress = _callable_accepts_keyword(
-            run_runtime_command,
-            "progress_callback",
-        )
-        try:
-            resolved_runtime = _ensure_runtime()
-        except Exception:
-            if runtime_command_accepts_progress:
-                return run_runtime_command(
-                    command,
-                    payload,
-                    progress_callback=progress_callback,
-                )
-            return run_runtime_command(command, payload)
-        with runtime_use_lock:
+        def _runner_task() -> dict[str, Any]:
+            _ensure_thread_event_loop()
+            runtime_command_accepts_progress = _callable_accepts_keyword(
+                run_runtime_command,
+                "progress_callback",
+            )
+            try:
+                resolved_runtime = _ensure_runtime()
+            except Exception:
+                if runtime_command_accepts_progress:
+                    return run_runtime_command(
+                        command,
+                        payload,
+                        progress_callback=progress_callback,
+                    )
+                return run_runtime_command(command, payload)
             if runtime_command_accepts_progress:
                 return run_runtime_command(
                     command,
@@ -467,6 +475,8 @@ def _lazy_shared_default_provider_and_runner() -> tuple[SnapshotProvider, Comman
                 payload,
                 runtime=resolved_runtime,
             )
+
+        return runtime_executor.submit(_runner_task).result()
 
     return lazy_provider, lazy_runner
 

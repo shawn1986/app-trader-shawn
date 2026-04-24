@@ -1,5 +1,5 @@
 const POLL_INTERVAL_MS = 5000;
-const COMMAND_STATUS_POLL_MS = 350;
+const COMMAND_STATUS_POLL_MS = 1500;
 
 let pendingTrade = null;
 let busyCommand = null;
@@ -64,6 +64,105 @@ function titleCase(value) {
     return source.charAt(0).toUpperCase() + source.slice(1);
 }
 
+function resultSeverity(result) {
+    const status = String(result?.status || "ok").toLowerCase();
+    if (Number(result?.symbol_error_count || 0) > 0) {
+        return "warning";
+    }
+    if (["ok", "ready", "accepted", "submitted"].includes(status)) {
+        return "ok";
+    }
+    return "error";
+}
+
+function firstSymbolError(result) {
+    const errors = Array.isArray(result?.symbol_errors) ? result.symbol_errors : [];
+    return errors.length > 0 ? errors[0] : null;
+}
+
+function summarizeScanResult(result) {
+    if (String(result?.command || "").toLowerCase() !== "scan") {
+        return "";
+    }
+    if (typeof result?.candidate_count !== "number") {
+        return "";
+    }
+
+    const parts = [`${result.candidate_count} candidates`];
+    if (typeof result?.watchlist_count === "number") {
+        parts.push(`${result.watchlist_count} watchlist`);
+    }
+
+    const summaries = Array.isArray(result?.symbol_summaries) ? result.symbol_summaries : [];
+    const quoteSummaries = summaries
+        .filter((summary) => typeof summary?.quotes_count === "number")
+        .slice(0, 3)
+        .map((summary) => `${summary.symbol || "symbol"} ${summary.quotes_count} quotes`);
+
+    let detail = `${parts.join(", ")}.`;
+    if (quoteSummaries.length > 0) {
+        detail = `${detail} ${quoteSummaries.join("; ")}.`;
+    }
+    if (summaries.length > quoteSummaries.length) {
+        detail = `${detail} +${summaries.length - quoteSummaries.length} symbols.`;
+    }
+    return detail;
+}
+
+function resultHeadline(result) {
+    const command = result?.command ? String(result.command).toUpperCase() : "SYSTEM";
+    const severity = resultSeverity(result);
+    if (severity === "warning") {
+        return `${command} warning`;
+    }
+    const status = result?.status ? String(result.status) : "ok";
+    return `${command} ${status}`;
+}
+
+function resultDetail(result) {
+    if (Number(result?.symbol_error_count || 0) > 0) {
+        const count = Number(result.symbol_error_count || 0);
+        const firstError = firstSymbolError(result);
+        const firstErrorText = firstError
+            ? `${firstError.symbol || "symbol"}: ${firstError.message || firstError.error_type || "failed"}`
+            : "Review symbol errors.";
+        return `${count} symbol errors. ${firstErrorText}`;
+    }
+    if (result?.reason) {
+        return String(result.reason);
+    }
+    return summarizeScanResult(result);
+}
+
+function renderPersistentResultSummary(result) {
+    const commandCopy = document.querySelector("[data-command-copy]");
+    const threatCopy = document.querySelector("[data-threat-copy]");
+    const severity = resultSeverity(result);
+    const detail = resultDetail(result);
+    const command = result?.command ? String(result.command).toUpperCase() : "SYSTEM";
+
+    if (commandCopy) {
+        if (severity === "warning") {
+            commandCopy.textContent = `${command} completed with ${detail}`;
+        } else if (severity === "error") {
+            commandCopy.textContent = `${command} ended with ${result?.status || "error"}. ${detail}`.trim();
+        } else if (detail) {
+            commandCopy.textContent = `${command} completed. ${detail}`;
+        } else {
+            commandCopy.textContent = COMMAND_COPY_DEFAULT;
+        }
+    }
+    if (threatCopy) {
+        if (severity === "warning") {
+            threatCopy.textContent = detail;
+        } else if (severity === "error") {
+            threatCopy.textContent = detail || `${command} needs review.`;
+        } else {
+            threatCopy.textContent = isArmed ? "Weapons free. Confirm trade before execution." : THREAT_COPY_DEFAULT;
+        }
+    }
+}
+
 function setArmedMode(armed) {
     isArmed = armed;
     document.body.dataset.mode = armed ? "armed" : "monitoring";
@@ -77,10 +176,20 @@ function prependMissionResult(result) {
     }
 
     const item = document.createElement("li");
-    const command = result.command ? String(result.command).toUpperCase() : "SYSTEM";
-    const status = result.status ? String(result.status) : "ok";
-    item.textContent = `${command} ${status}`;
+    const headline = document.createElement("span");
+    const detail = resultDetail(result);
+    item.dataset.severity = resultSeverity(result);
+    headline.className = "mission-log__headline";
+    headline.textContent = resultHeadline(result);
+    item.appendChild(headline);
+    if (detail) {
+        const detailEl = document.createElement("span");
+        detailEl.className = "mission-log__detail";
+        detailEl.textContent = detail;
+        item.appendChild(detailEl);
+    }
     missionLog.prepend(item);
+    renderPersistentResultSummary(result);
 }
 
 function showTradeConfirm() {
@@ -171,8 +280,9 @@ async function commandResultFromResponse(response, commandName) {
     }
 
     let reason = "failed";
+    let payload = null;
     try {
-        const payload = await response.json();
+        payload = await response.json();
         if (payload && typeof payload.reason === "string") {
             reason = payload.reason;
         }
@@ -182,6 +292,14 @@ async function commandResultFromResponse(response, commandName) {
 
     if (reason === "armed_mode_required") {
         relockWarRoom();
+    }
+
+    if (reason === "command_in_progress" && payload?.status === "running" && payload?.job_id) {
+        return {
+            ...payload,
+            command: payload.command || commandName,
+            reason,
+        };
     }
 
     return {command: commandName, status: reason};
@@ -288,6 +406,45 @@ async function monitorCommandJob(jobId, commandName) {
     return {command: commandName, status: "cancelled"};
 }
 
+function attachToRunningCommand(status) {
+    if (status?.status !== "running" || !status?.job_id) {
+        return;
+    }
+
+    const commandName = status.command || busyCommand || "scan";
+    if (activeCommandJobId === status.job_id) {
+        updateOverlayFromStatus(status);
+        return;
+    }
+
+    showCommandOverlay(commandName);
+    activeCommandJobId = status.job_id;
+    updateOverlayFromStatus(status);
+    monitorCommandJob(status.job_id, commandName)
+        .then(async (result) => {
+            if (activeCommandJobId === status.job_id) {
+                hideCommandOverlay();
+            }
+            prependMissionResult(result);
+            await fetchSnapshot();
+        })
+        .catch(() => {
+            if (activeCommandJobId === status.job_id) {
+                hideCommandOverlay();
+            }
+            prependMissionResult({command: commandName, status: "failed"});
+        });
+}
+
+async function syncCommandStatus() {
+    if (activeCommandJobId !== null) {
+        return null;
+    }
+    const status = await fetchCommandStatus();
+    attachToRunningCommand(status);
+    return status;
+}
+
 async function fetchSnapshot() {
     const response = await fetch("/api/war-room/snapshot");
     if (!response.ok) {
@@ -302,6 +459,13 @@ async function fetchSnapshot() {
     }
     document.body.dataset.threat = String(threat).toLowerCase();
     return snapshot;
+}
+
+async function pollSnapshot() {
+    if (busyCommand !== null) {
+        return null;
+    }
+    return await fetchSnapshot();
 }
 
 async function armWarRoom() {
@@ -337,7 +501,10 @@ async function runCommand(commandName) {
         return;
     }
 
+    pendingTrade = null;
+    hideTradeConfirm();
     showCommandOverlay(commandName);
+    let result = null;
     try {
         const response = await fetch(`/api/war-room/commands/${commandName}`, {
             method: "POST",
@@ -345,15 +512,15 @@ async function runCommand(commandName) {
             body: JSON.stringify({confirmed: true, async: true}),
         });
         const accepted = await commandResultFromResponse(response, commandName);
-        const result =
-            response.status === 202 && accepted.job_id
-                ? await monitorCommandJob(accepted.job_id, commandName)
+        result =
+            accepted.job_id && (response.status === 202 || accepted.reason === "command_in_progress")
+                ? await monitorCommandJob(accepted.job_id, accepted.command || commandName)
                 : accepted;
-        prependMissionResult(result);
         await fetchSnapshot();
     } finally {
         hideCommandOverlay();
     }
+    prependMissionResult(result);
 }
 
 async function confirmTrade() {
@@ -362,6 +529,7 @@ async function confirmTrade() {
     }
 
     showCommandOverlay("trade");
+    let result = null;
     try {
         const response = await fetch("/api/war-room/commands/trade", {
             method: "POST",
@@ -369,18 +537,18 @@ async function confirmTrade() {
             body: JSON.stringify({confirmed: true, async: true}),
         });
         const accepted = await commandResultFromResponse(response, "trade");
-        const result =
-            response.status === 202 && accepted.job_id
-                ? await monitorCommandJob(accepted.job_id, "trade")
+        result =
+            accepted.job_id && (response.status === 202 || accepted.reason === "command_in_progress")
+                ? await monitorCommandJob(accepted.job_id, accepted.command || "trade")
                 : accepted;
 
-        prependMissionResult(result);
         pendingTrade = null;
         hideTradeConfirm();
         await fetchSnapshot();
     } finally {
         hideCommandOverlay();
     }
+    prependMissionResult(result);
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -417,8 +585,16 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    fetchSnapshot().catch(() => prependMissionResult({command: "snapshot", status: "failed"}));
+    syncCommandStatus()
+        .catch(() => undefined)
+        .finally(() => {
+            pollSnapshot().catch(() => prependMissionResult({command: "snapshot", status: "failed"}));
+        });
     window.setInterval(() => {
-        fetchSnapshot().catch(() => undefined);
+        syncCommandStatus()
+            .catch(() => undefined)
+            .finally(() => {
+                pollSnapshot().catch(() => undefined);
+            });
     }, POLL_INTERVAL_MS);
 });

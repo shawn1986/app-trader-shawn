@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from datetime import UTC, date, datetime
 from importlib import import_module
+import inspect
 import math
-from typing import Any
+from typing import Any, Callable
 
 from trader_shawn.domain.models import (
     AccountSnapshot,
@@ -26,6 +27,7 @@ class IbkrMarketDataClient:
         ib_api: Any | None = None,
         client_factory: Any | None = None,
         market_data_type: str = "live",
+        request_timeout_seconds: float = 30,
     ) -> None:
         self._host = host
         self._port = port
@@ -34,6 +36,7 @@ class IbkrMarketDataClient:
         self._ibkr_module = ibkr_module if ibkr_module is not None else ib_api
         self._client_factory = client_factory
         self._market_data_type = market_data_type
+        self._request_timeout_seconds = request_timeout_seconds
 
     @property
     def market_data_type(self) -> str:
@@ -41,6 +44,7 @@ class IbkrMarketDataClient:
 
     def ensure_connected(self) -> Any:
         client = self._resolve_client()
+        self._apply_request_timeout(client)
         is_connected = getattr(client, "isConnected", None)
         if callable(is_connected) and is_connected():
             self._request_market_data_type(client)
@@ -49,7 +53,15 @@ class IbkrMarketDataClient:
         connect = getattr(client, "connect", None)
         if not callable(connect):
             raise RuntimeError("IBKR client does not support connect()")
-        connect(self._host, self._port, clientId=self._client_id)
+        if _callable_accepts_keyword(connect, "timeout"):
+            connect(
+                self._host,
+                self._port,
+                clientId=self._client_id,
+                timeout=self._request_timeout_seconds,
+            )
+        else:
+            connect(self._host, self._port, clientId=self._client_id)
         self._request_market_data_type(client)
         return client
 
@@ -101,6 +113,7 @@ class IbkrMarketDataClient:
         strike_window_pct: float = 0.15,
         fallback_strike_count: int | None = None,
         max_expiries: int | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[OptionQuote]:
         fallback_strike_count = (
             4
@@ -121,21 +134,46 @@ class IbkrMarketDataClient:
         if max_expiries <= 0:
             raise ValueError("max_expiries must be positive")
 
+        _emit_progress(
+            progress_callback,
+            "ibkr_connecting",
+            f"Connecting to IBKR for {ticker}.",
+        )
         client = self.ensure_connected()
         ibkr = self._resolve_ibkr_module()
         stock = ibkr.Stock(symbol=ticker, exchange=exchange, currency=currency)
+        _emit_progress(
+            progress_callback,
+            "ibkr_underlying_qualifying",
+            f"Qualifying {ticker} stock contract.",
+        )
         qualified_stock = list(client.qualifyContracts(stock))[0]
         underlying_spot = None
         if self._market_data_type != "delayed":
+            _emit_progress(
+                progress_callback,
+                "ibkr_underlying_history_fetching",
+                f"Fetching {ticker} historical close.",
+            )
             underlying_spot = _historical_close_price(
                 self._fetch_underlying_history(client, qualified_stock)
             )
         if underlying_spot is None and self._market_data_type != "delayed":
+            _emit_progress(
+                progress_callback,
+                "ibkr_underlying_snapshot_fetching",
+                f"Fetching {ticker} underlying snapshot.",
+            )
             underlying_snapshot = client.reqTickers(qualified_stock)[0]
             try:
                 underlying_spot = _ticker_market_price(underlying_snapshot)
             except RuntimeError:
                 underlying_spot = None
+        _emit_progress(
+            progress_callback,
+            "ibkr_option_chain_fetching",
+            f"Fetching {ticker} option chain.",
+        )
         option_chain = _select_option_chain(
             client.reqSecDefOptParams(
                 ticker,
@@ -162,8 +200,13 @@ class IbkrMarketDataClient:
                 option_chain.expirations,
                 today=as_of or date.today(),
                 min_dte=min_dte,
-                max_dte=max_dte,
+            max_dte=max_dte,
         )[:max_expiries]
+        _emit_progress(
+            progress_callback,
+            "ibkr_contract_details_fetching",
+            f"Fetching {ticker} option contract details.",
+        )
         option_contracts = self._fetch_valid_option_contracts(
             client,
             ibkr,
@@ -178,7 +221,19 @@ class IbkrMarketDataClient:
         if not option_contracts:
             return []
 
+        _emit_progress(
+            progress_callback,
+            "ibkr_options_qualifying",
+            f"Qualifying {ticker} option contracts.",
+            contract_count=len(option_contracts),
+        )
         qualified_options = list(client.qualifyContracts(*option_contracts))
+        _emit_progress(
+            progress_callback,
+            "ibkr_option_snapshots_fetching",
+            f"Requesting {ticker} option quote snapshots.",
+            contract_count=len(qualified_options),
+        )
         snapshots = list(client.reqTickers(*qualified_options))
         return self.normalize_option_quotes(
             ticker,
@@ -388,6 +443,7 @@ class IbkrMarketDataClient:
                     whatToShow="TRADES",
                     useRTH=True,
                     formatDate=1,
+                    timeout=self._request_timeout_seconds,
                 )
             )
         except Exception:
@@ -428,7 +484,9 @@ class IbkrMarketDataClient:
                 )
                 try:
                     contract_details = list(req_contract_details(template))
-                except Exception:
+                except Exception as exc:
+                    if _is_timeout_error(exc):
+                        raise
                     contract_details = []
                 for detail in contract_details:
                     contract = getattr(detail, "contract", detail)
@@ -465,6 +523,10 @@ class IbkrMarketDataClient:
             for strike in selected_strikes
             for right in selected_rights
         ]
+
+    def _apply_request_timeout(self, client: Any) -> None:
+        if hasattr(client, "RequestTimeout"):
+            setattr(client, "RequestTimeout", self._request_timeout_seconds)
 
 
 def _bounded_expiries(
@@ -710,3 +772,30 @@ def _try_optional_int(value: object) -> int | None:
     if not math.isfinite(parsed) or not parsed.is_integer():
         return None
     return int(parsed)
+
+
+def _emit_progress(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    stage: str,
+    message: str,
+    **details: Any,
+) -> None:
+    if callable(progress_callback):
+        progress_callback({"stage": stage, "message": message, **details})
+
+
+def _callable_accepts_keyword(func: Callable[..., Any], name: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == name:
+            return True
+    return False
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    return isinstance(exc, TimeoutError) or "timed out" in str(exc).lower()
