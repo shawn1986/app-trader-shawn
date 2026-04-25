@@ -102,6 +102,12 @@ ibkr:
   host: 127.0.0.1
   port: 4002
   client_id: 7
+scan_inputs:
+  min_dte: 5
+  max_dte: 35
+  strike_window_pct: 0.25
+  fallback_strike_count: 12
+  max_expiries: 3
 audit_db_path: runtime/audit.db
 ```
 
@@ -113,6 +119,7 @@ audit_db_path: runtime/audit.db
 - `ibkr.host`: 通常是 `127.0.0.1`
 - `ibkr.port`: 需符合 TWS/IB Gateway 的 API socket port
 - `ibkr.client_id`: market data client ID，execution client 會使用 `client_id + 1`
+- `scan_inputs`: IBKR option quote 掃描範圍，例如 DTE、strike window、fallback strike 數量、expiry 數量
 - `audit_db_path`: audit SQLite DB 位置，若是相對路徑，會以 repo root 為基準
 
 ### `config/symbols.yaml`
@@ -296,6 +303,39 @@ python -m trader_shawn.app dashboard runtime/dashboard.json
 
 這是 JSON 快照檢視，不是完整 UI。完整監控請用 War Room。
 
+### `collect-quotes`
+
+收集 option quote snapshots，存進 `runtime/audit.db`，之後可作為 replay scan / backtest 的資料基礎。這個命令不做 AI 決策，也不送單。
+
+先跑一次可以確認 IBKR 與設定正常：
+
+```powershell
+python -m trader_shawn.app collect-quotes --once
+```
+
+注意：`--once` 在非交易時段通常只適合做連線檢查，不代表能收集到有回測價值的 option data。要建立可 replay 的資料，應該在美股 options 有報價的盤中時段長駐收集。
+
+確認成功後，可以用 interval 在盤中長駐收集。例如每 5 分鐘收一次：
+
+```powershell
+python -m trader_shawn.app collect-quotes --interval 300
+```
+
+重點：
+
+- 會使用 `config/symbols.yaml` 的 symbol universe
+- 會套用 `config/app.yaml` 的 `scan_inputs`
+- 會把每個 symbol 的 quote batch 寫入 SQLite
+- 單一 symbol 失敗時不會中斷整批，結果會回傳 `partial`
+- 目前只是收集資料，War Room 尚未接上 stored snapshot replay
+
+時段判斷：
+
+- 最有價值：美股 options 盤中，bid/ask、delta、volume、open interest 較可能可用
+- 盤前：通常只能拿來測 IBKR 連線，資料可能缺 bid/ask 或 greeks
+- 收盤後：snapshot 可能 stale、bid/ask 失真或空掉
+- 台灣時間約為夏令 21:30-04:00、冬令 22:30-05:00
+
 ## War Room 戰情室
 
 War Room 是本機戰情室 UI，用來集中查看：
@@ -388,9 +428,20 @@ runtime/audit.db
 用途：
 
 - `dashboard.json`: 最近一次 cycle / command 狀態摘要
-- `audit.db`: managed positions、position events、order uncertainty 等 audit record
+- `audit.db`: managed positions、position events、order uncertainty、quote snapshots 等 audit/runtime record
 
 不要手動刪除 `audit.db`，除非你確定要重置本地 managed position 記錄。刪除 audit DB 會讓系統失去對既有部位的本地追蹤脈絡。
+
+`collect-quotes` 會在 `audit.db` 建立並寫入：
+
+- `quote_snapshots`: 每次 symbol quote batch 的時間、market data type、scan inputs、quote count
+- `option_quotes`: 每個 option contract 的 expiry、strike、right、bid、ask、delta、last、mark、volume、open interest
+
+快速檢查最近收集結果：
+
+```powershell
+sqlite3 runtime/audit.db "select symbol, collected_at, quote_count from quote_snapshots order by id desc limit 10;"
+```
 
 ## 測試
 
@@ -554,6 +605,14 @@ python -m pytest -q
 python -m trader_shawn.app scan
 python -m trader_shawn.app decide
 ```
+
+盤中資料收集：
+
+```powershell
+python -m trader_shawn.app collect-quotes --interval 300
+```
+
+`collect-quotes --interval 300` 建議在美股 options 盤中長駐執行。盤前若要跑 `collect-quotes --once`，用途是檢查 IBKR 連線與設定，不是建立有效回測資料。
 
 盤中監控：
 
