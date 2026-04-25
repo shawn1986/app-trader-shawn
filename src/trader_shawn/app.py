@@ -7,6 +7,7 @@ import inspect
 import json
 import math
 from pathlib import Path
+import time
 from typing import Any, Callable, Sequence
 from uuid import uuid4
 
@@ -23,8 +24,10 @@ from trader_shawn.domain.models import AccountSnapshot, CandidateSpread, Managed
 from trader_shawn.events.earnings_calendar import EarningsCalendar
 from trader_shawn.execution.ibkr_executor import IbkrExecutor, OrderNotSubmittedError
 from trader_shawn.market_data.ibkr_market_data import IbkrMarketDataClient
+from trader_shawn.market_data.quote_collector import collect_quote_snapshots
 from trader_shawn.monitoring.audit_logger import AuditLogger
 from trader_shawn.monitoring.dashboard_api import read_dashboard_snapshot, update_dashboard_state
+from trader_shawn.monitoring.quote_snapshot_store import QuoteSnapshotStore
 from trader_shawn.positions.manager import PositionManager
 from trader_shawn.risk.guard import RiskGuard
 from trader_shawn.settings import AppSettings, load_settings
@@ -427,6 +430,13 @@ def manage_command() -> None:
     click.echo(json.dumps(_manage_command(), sort_keys=True))
 
 
+@cli.command("collect-quotes")
+@click.option("--once", is_flag=True, help="Collect one quote snapshot batch and exit.")
+@click.option("--interval", type=int, default=None, help="Seconds between collection batches.")
+def collect_quotes_command(once: bool, interval: int | None) -> None:
+    click.echo(json.dumps(_collect_quotes_command(once=once, interval=interval), sort_keys=True))
+
+
 @cli.command("dashboard")
 @click.argument("state_path", type=click.Path(path_type=Path))
 def dashboard_command(state_path: Path) -> None:
@@ -634,6 +644,52 @@ def _scan_command_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
     if scan_result.symbol_summaries:
         response["symbol_summaries"] = _json_safe(scan_result.symbol_summaries)
     return response
+
+
+def _collect_quotes_command(*, once: bool, interval: int | None) -> dict[str, Any]:
+    if interval is not None and interval <= 0:
+        return {
+            "command": "collect-quotes",
+            "status": "error",
+            "reason": "invalid_interval",
+            "message": "interval must be a positive number of seconds",
+        }
+
+    runtime, error = _load_command_runtime()
+    if error is not None:
+        return error
+    try:
+        if once or interval is None:
+            return _collect_quotes_once_with_runtime(runtime)
+
+        last_result: dict[str, Any] | None = None
+        try:
+            while True:
+                last_result = _collect_quotes_once_with_runtime(runtime)
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            return {
+                **_command_envelope("collect-quotes", runtime=runtime),
+                "status": "stopped",
+                "last_result": last_result,
+            }
+    finally:
+        _disconnect_runtime(runtime)
+
+
+def _collect_quotes_once_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
+    market_data_client = getattr(runtime, "account_service", None)
+    store = QuoteSnapshotStore(runtime.settings.audit_db_path)
+    result = collect_quote_snapshots(
+        market_data_client=market_data_client,
+        store=store,
+        symbols=list(runtime.settings.symbols),
+        scan_inputs=getattr(runtime.settings, "scan_inputs", None),
+    )
+    return {
+        **_command_envelope("collect-quotes", runtime=runtime),
+        **result,
+    }
 
 
 def _decide_command() -> dict[str, Any]:
