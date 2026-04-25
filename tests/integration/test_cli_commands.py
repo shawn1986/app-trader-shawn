@@ -730,6 +730,159 @@ def test_collect_quotes_command_records_option_snapshots_once(monkeypatch, tmp_p
     ]
 
 
+def test_automator_command_runs_paper_observe_cycle_once(monkeypatch) -> None:
+    runner = CliRunner()
+    calls: list[str] = []
+
+    class SnapshotMarketDataClient:
+        market_data_type = "delayed"
+
+        def fetch_option_quotes(self, symbol: str, **kwargs) -> list[OptionQuote]:
+            _ = kwargs
+            calls.append(f"collect:{symbol}")
+            return []
+
+    class TrackingScanner(FakeScanner):
+        def scan_candidates(self, symbols: list[str]) -> list[CandidateSpread]:
+            _ = symbols
+            calls.append("decide-scan")
+            return []
+
+        def scan_market(self, symbols: list[str]) -> object:
+            calls.append("scan")
+            return SimpleNamespace(candidates=[], watchlist=[])
+
+    scanner = TrackingScanner([])
+    settings = _settings(symbols=["AMD"])
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(
+            scanner=scanner,
+            account_service=SnapshotMarketDataClient(),
+            position_service=FakePositionService(open_symbol_count=0),
+            position_manager=SimpleNamespace(manage_positions=lambda: calls.append("manage") or {"status": "ok"}),
+            settings=settings,
+        ),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["automator", "--profile", "paper-observe", "--once"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "ok"
+    assert payload["profile"] == "paper-observe"
+    assert [step["command"] for step in payload["steps"]] == [
+        "collect-quotes",
+        "decide",
+        "manage",
+    ]
+    assert calls == ["collect:AMD", "decide-scan", "manage"]
+
+
+def test_automator_command_rejects_unsupported_interval_profile(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(settings=_settings(symbols=["AMD"])),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["automator", "--profile", "unknown", "--interval", "300"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "error"
+    assert payload["reason"] == "unsupported_profile"
+    assert payload["profile"] == "unknown"
+
+
+def test_automator_command_rejects_paper_observe_in_live_mode(monkeypatch) -> None:
+    runner = CliRunner()
+    settings = _settings(symbols=["AMD"])
+    settings.mode = "live"
+    settings.live_enabled = True
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(settings=settings),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["automator", "--profile", "paper-observe", "--once"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "error"
+    assert payload["reason"] == "profile_requires_paper_mode"
+    assert payload["mode"] == "live"
+
+
+def test_automator_interval_rejects_paper_observe_in_live_mode(monkeypatch) -> None:
+    runner = CliRunner()
+    settings = _settings(symbols=["AMD"])
+    settings.mode = "live"
+    settings.live_enabled = True
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(settings=settings),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["automator", "--profile", "paper-observe", "--interval", "300"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "error"
+    assert payload["reason"] == "profile_requires_paper_mode"
+    assert payload["mode"] == "live"
+
+
+def test_automator_interval_exits_on_step_error(monkeypatch) -> None:
+    runner = CliRunner()
+
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(account_service=object(), settings=_settings(symbols=["AMD"])),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["automator", "--profile", "paper-observe", "--interval", "300"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "error"
+    assert payload["steps"][0]["command"] == "collect-quotes"
+    assert payload["steps"][0]["status"] == "error"
+
+
+def test_automator_interval_handles_keyboard_interrupt_during_first_cycle(monkeypatch) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(settings=_settings(symbols=["AMD"])),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module.AutomationRunner,
+        "run_once",
+        lambda self, *, profile: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    result = runner.invoke(cli, ["automator", "--profile", "paper-observe", "--interval", "300"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "stopped"
+    assert payload["profile"] == "paper-observe"
+    assert payload["last_result"] is None
+
+
 def test_scan_command_preserves_legacy_scan_market_list_results(monkeypatch) -> None:
     runner = CliRunner()
 

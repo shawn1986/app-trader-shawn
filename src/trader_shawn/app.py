@@ -17,6 +17,7 @@ import uvicorn
 from trader_shawn.ai.claude_cli_adapter import ClaudeCliAdapter
 from trader_shawn.ai.codex_adapter import CodexAdapter
 from trader_shawn.ai.service import AiDecisionService
+from trader_shawn.automation.runner import AutomationRunner
 from trader_shawn.candidate_builder.credit_spread_builder import build_candidates
 from trader_shawn.candidate_builder.paper_watchlist_builder import build_paper_watchlist
 from trader_shawn.domain.enums import DecisionAction
@@ -437,6 +438,19 @@ def collect_quotes_command(once: bool, interval: int | None) -> None:
     click.echo(json.dumps(_collect_quotes_command(once=once, interval=interval), sort_keys=True))
 
 
+@cli.command("automator")
+@click.option("--profile", default="paper-observe", show_default=True)
+@click.option("--once", is_flag=True, help="Run one automation cycle and exit.")
+@click.option("--interval", type=int, default=None, help="Seconds between automation cycles.")
+def automator_command(profile: str, once: bool, interval: int | None) -> None:
+    click.echo(
+        json.dumps(
+            _automator_command(profile=profile, once=once, interval=interval),
+            sort_keys=True,
+        )
+    )
+
+
 @cli.command("dashboard")
 @click.argument("state_path", type=click.Path(path_type=Path))
 def dashboard_command(state_path: Path) -> None:
@@ -690,6 +704,56 @@ def _collect_quotes_once_with_runtime(runtime: CliRuntime) -> dict[str, Any]:
         **_command_envelope("collect-quotes", runtime=runtime),
         **result,
     }
+
+
+def _automator_command(*, profile: str, once: bool, interval: int | None) -> dict[str, Any]:
+    if interval is not None and interval <= 0:
+        return {
+            "command": "automator",
+            "status": "error",
+            "reason": "invalid_interval",
+            "message": "interval must be a positive number of seconds",
+        }
+
+    runtime, error = _load_command_runtime()
+    if error is not None:
+        return error
+    try:
+        runner = AutomationRunner(
+            runtime=runtime,
+            command_runner=_run_automation_runtime_command,
+            quote_collector=_collect_quotes_once_with_runtime,
+        )
+        if once or interval is None:
+            profile_check = runner.run_once(profile=profile)
+            return {
+                **_command_envelope("automator", runtime=runtime),
+                **profile_check,
+            }
+
+        last_result: dict[str, Any] | None = None
+        try:
+            while True:
+                last_result = {
+                    **_command_envelope("automator", runtime=runtime),
+                    **runner.run_once(profile=profile),
+                }
+                if last_result.get("status") == "error":
+                    return last_result
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            return {
+                **_command_envelope("automator", runtime=runtime),
+                "status": "stopped",
+                "profile": profile,
+                "last_result": last_result,
+            }
+    finally:
+        _disconnect_runtime(runtime)
+
+
+def _run_automation_runtime_command(command: str, runtime: CliRuntime) -> dict[str, Any]:
+    return run_cli_command_with_runtime(command, runtime)
 
 
 def _decide_command() -> dict[str, Any]:

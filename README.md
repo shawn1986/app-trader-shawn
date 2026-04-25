@@ -336,6 +336,33 @@ python -m trader_shawn.app collect-quotes --interval 300
 - 收盤後：snapshot 可能 stale、bid/ask 失真或空掉
 - 台灣時間約為夏令 21:30-04:00、冬令 22:30-05:00
 
+### `automator`
+
+本機自動化 runner，用來避免盤中手動重複按 scan / decide / manage。第一版 profile 是 `paper-observe`，會依序執行：
+
+1. `collect-quotes`
+2. `decide`
+3. `manage`
+
+跑一次：
+
+```powershell
+python -m trader_shawn.app automator --profile paper-observe --once
+```
+
+盤中長駐，例如每 5 分鐘跑一輪：
+
+```powershell
+python -m trader_shawn.app automator --profile paper-observe --interval 300
+```
+
+安全邊界：
+
+- `paper-observe` 不會自動執行 `trade`
+- `paper-observe` 只允許在 `mode: paper` 執行；live mode 會直接拒絕
+- live mode 初期仍應保留人工確認，不要讓 automation 自動 confirm order
+- 若只是要累積 replay/backtest 資料，單跑 `collect-quotes --interval 300` 即可
+
 ## War Room 戰情室
 
 War Room 是本機戰情室 UI，用來集中查看：
@@ -613,6 +640,14 @@ python -m trader_shawn.app collect-quotes --interval 300
 ```
 
 `collect-quotes --interval 300` 建議在美股 options 盤中長駐執行。盤前若要跑 `collect-quotes --once`，用途是檢查 IBKR 連線與設定，不是建立有效回測資料。
+
+盤中 paper 觀察自動化：
+
+```powershell
+python -m trader_shawn.app automator --profile paper-observe --interval 300
+```
+
+這會自動收 quote、decide、manage，但不會自動 trade。`decide` 內部會自行掃描候選，不會再額外跑一次 `scan`。
 
 盤中監控：
 
