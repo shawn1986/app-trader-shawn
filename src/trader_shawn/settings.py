@@ -60,6 +60,24 @@ class ScanFilterSettings(BaseModel):
         return self
 
 
+class ScanInputSettings(BaseModel):
+    min_dte: NonNegativeInt = 7
+    max_dte: PositiveInt = 21
+    strike_window_pct: Percent = 0.15
+    fallback_strike_count: PositiveInt | None = None
+    max_expiries: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def validate_dte_range(self) -> "ScanInputSettings":
+        if self.min_dte > self.max_dte:
+            raise PydanticCustomError(
+                "invalid_scan_dte_range",
+                "min_dte must be less than or equal to max_dte",
+                {"min_dte": self.min_dte, "max_dte": self.max_dte},
+            )
+        return self
+
+
 class ProviderSettings(BaseModel):
     provider_mode: str
     primary_provider: str
@@ -82,6 +100,7 @@ class AppConfigSettings(BaseModel):
     market_data_type: Literal["live", "delayed"] = "live"
     ibkr: IBKRSettings
     scan_filters: ScanFilterSettings = Field(default_factory=ScanFilterSettings)
+    scan_inputs: ScanInputSettings = Field(default_factory=ScanInputSettings)
     audit_db_path: Path
 
     @model_validator(mode="after")

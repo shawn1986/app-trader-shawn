@@ -62,12 +62,14 @@ class CliScanner:
         earnings_calendar: EarningsCalendar,
         mode: str,
         candidate_filters: Any | None = None,
+        scan_inputs: Any | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._market_data_client = market_data_client
         self._earnings_calendar = earnings_calendar
         self._mode = mode
         self._candidate_filters = candidate_filters
+        self._scan_inputs = scan_inputs
         self._progress_callback = progress_callback
 
     def set_progress_callback(
@@ -259,11 +261,15 @@ class CliScanner:
                 **payload,
             )
 
+        keyword_args = _scan_input_kwargs(self._scan_inputs, fetch_option_quotes)
         if _callable_accepts_keyword(fetch_option_quotes, "progress_callback"):
+            keyword_args["progress_callback"] = progress_callback
+
+        if keyword_args:
             return list(
                 fetch_option_quotes(
                     symbol,
-                    progress_callback=progress_callback,
+                    **keyword_args,
                 )
             )
         return list(fetch_option_quotes(symbol))
@@ -535,6 +541,7 @@ def build_cli_runtime() -> CliRuntime:
             earnings_calendar=earnings_calendar,
             mode=settings.mode,
             candidate_filters=getattr(settings, "scan_filters", None),
+            scan_inputs=getattr(settings, "scan_inputs", None),
         ),
         account_service=market_data_client,
         decision_service=_build_decision_service(settings),
@@ -1582,6 +1589,25 @@ def _callable_accepts_keyword(func: Callable[..., Any], name: str) -> bool:
         if parameter.name == name:
             return True
     return False
+
+
+def _scan_input_kwargs(scan_inputs: Any | None, func: Callable[..., Any]) -> dict[str, Any]:
+    if scan_inputs is None:
+        return {}
+    kwargs: dict[str, Any] = {}
+    for name in (
+        "min_dte",
+        "max_dte",
+        "strike_window_pct",
+        "fallback_strike_count",
+        "max_expiries",
+    ):
+        if not _callable_accepts_keyword(func, name):
+            continue
+        value = getattr(scan_inputs, name, None)
+        if value is not None:
+            kwargs[name] = value
+    return kwargs
 
 
 if __name__ == "__main__":

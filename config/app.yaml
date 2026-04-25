@@ -13,4 +13,10 @@ scan_filters:
   max_abs_delta: 0.35
   max_width: 5
   max_bid_ask_ratio: 2.50
+scan_inputs:
+  min_dte: 5
+  max_dte: 35
+  strike_window_pct: 0.25
+  fallback_strike_count: 12
+  max_expiries: 3
 audit_db_path: runtime/audit.db

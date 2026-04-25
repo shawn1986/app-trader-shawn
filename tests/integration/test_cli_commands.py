@@ -624,6 +624,44 @@ def test_cli_scanner_uses_configured_candidate_filters() -> None:
     ]
 
 
+def test_cli_scanner_uses_configured_scan_inputs() -> None:
+    class CapturingMarketDataClient:
+        market_data_type = "delayed"
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def fetch_option_quotes(self, symbol: str, **kwargs) -> list[OptionQuote]:
+            self.calls.append({"symbol": symbol, **kwargs})
+            return []
+
+    market_data = CapturingMarketDataClient()
+    scanner = CliScanner(
+        market_data_client=market_data,
+        earnings_calendar=EarningsCalendar([]),
+        mode="paper",
+        scan_inputs=SimpleNamespace(
+            min_dte=5,
+            max_dte=35,
+            strike_window_pct=0.25,
+            fallback_strike_count=12,
+            max_expiries=3,
+        ),
+    )
+
+    scanner.scan_market(["AMD"])
+
+    assert market_data.calls
+    call = market_data.calls[0]
+    assert call["symbol"] == "AMD"
+    assert call["min_dte"] == 5
+    assert call["max_dte"] == 35
+    assert call["strike_window_pct"] == 0.25
+    assert call["fallback_strike_count"] == 12
+    assert call["max_expiries"] == 3
+    assert "progress_callback" in call
+
+
 def test_scan_command_preserves_legacy_scan_market_list_results(monkeypatch) -> None:
     runner = CliRunner()
 
