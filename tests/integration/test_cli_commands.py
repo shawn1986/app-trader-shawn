@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,6 +59,13 @@ def _settings(*, symbols: list[str] | None = None) -> SimpleNamespace:
         live_enabled=False,
         market_data_type="live",
         symbols=symbols or ["SPY", "QQQ", "AMD"],
+        scan_inputs=SimpleNamespace(
+            min_dte=5,
+            max_dte=35,
+            strike_window_pct=0.25,
+            fallback_strike_count=12,
+            max_expiries=3,
+        ),
         risk=SimpleNamespace(
             max_risk_per_trade_pct=0.02,
             max_daily_loss_pct=0.04,
@@ -224,9 +232,10 @@ def _runtime(
     executor: FakeExecutor | None = None,
     audit_logger: AuditLogger | None = None,
     dashboard_state_path: Path | None = None,
+    settings: SimpleNamespace | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        settings=_settings(),
+        settings=settings or _settings(),
         config_dir=(Path.cwd() / "config").resolve(),
         scanner=scanner,
         decision_service=decision_service,
@@ -660,6 +669,65 @@ def test_cli_scanner_uses_configured_scan_inputs() -> None:
     assert call["fallback_strike_count"] == 12
     assert call["max_expiries"] == 3
     assert "progress_callback" in call
+
+
+def test_collect_quotes_command_records_option_snapshots_once(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    class SnapshotMarketDataClient:
+        market_data_type = "delayed"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def fetch_option_quotes(self, symbol: str, **kwargs) -> list[OptionQuote]:
+            self.calls.append((symbol, kwargs))
+            return [
+                OptionQuote(
+                    symbol=symbol,
+                    expiry="2026-05-08",
+                    strike=160,
+                    right="P",
+                    bid=1.1,
+                    ask=1.3,
+                    delta=-0.21,
+                    volume=140,
+                    open_interest=610,
+                )
+            ]
+
+    market_data = SnapshotMarketDataClient()
+    settings = _settings(symbols=["AMD", "NVDA"])
+    settings.audit_db_path = tmp_path / "audit.db"
+    monkeypatch.setattr(
+        app_module,
+        "build_cli_runtime",
+        lambda: _runtime(account_service=market_data, settings=settings),
+        raising=False,
+    )
+
+    result = runner.invoke(cli, ["collect-quotes", "--once"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "ok"
+    assert payload["symbol_count"] == 2
+    assert payload["quote_count"] == 2
+    assert [symbol for symbol, _kwargs in market_data.calls] == ["AMD", "NVDA"]
+    assert market_data.calls[0][1]["min_dte"] == 5
+    assert market_data.calls[0][1]["max_dte"] == 35
+    with sqlite3.connect(tmp_path / "audit.db") as connection:
+        snapshot_rows = connection.execute(
+            "select symbol, quote_count from quote_snapshots order by id"
+        ).fetchall()
+        quote_rows = connection.execute(
+            "select symbol, expiry, strike, right from option_quotes order by id"
+        ).fetchall()
+    assert snapshot_rows == [("AMD", 1), ("NVDA", 1)]
+    assert quote_rows == [
+        ("AMD", "2026-05-08", 160.0, "P"),
+        ("NVDA", "2026-05-08", 160.0, "P"),
+    ]
 
 
 def test_scan_command_preserves_legacy_scan_market_list_results(monkeypatch) -> None:
